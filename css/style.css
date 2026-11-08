@@ -308,6 +308,20 @@ details.card > summary::-webkit-details-marker {
   color: var(--muted);
 }
 
+.curve-sub:empty {
+  display: none;
+}
+
+.curve-sub .down,
+.grade-hint .down {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.grade-hint {
+  margin: -4px 0 0;
+}
+
 .curve-speeds {
   display: grid;
   gap: 6px;

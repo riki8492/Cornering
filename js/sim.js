@@ -85,6 +85,35 @@ export function demoWays(course, origin) {
   ];
 }
 
+/**
+ * デモコースの標高：前半で 60m 登り、後半で下る峠道。
+ * 標高プロバイダと同じ get(lat, lon) を持つ（最寄りのコース上の点の標高を返す）
+ */
+export function demoElevation(course, origin, rise = 60) {
+  const proj = makeProjector(origin.lat, origin.lon);
+  const L = course.length;
+  const elevAtS = (s) => 400 + rise * Math.sin((Math.PI * s) / L);
+  return {
+    status: 'ready',
+    source: 'デモ',
+    elevAtS,
+    get(lat, lon) {
+      const p = proj.toXY(lat, lon);
+      let best = Infinity;
+      let bs = 0;
+      for (let i = 0; i < course.pts.length; i += 2) {
+        const q = course.pts[i];
+        const d = (q.x - p.x) ** 2 + (q.y - p.y) ** 2;
+        if (d < best) {
+          best = d;
+          bs = q.s;
+        }
+      }
+      return elevAtS(bs);
+    },
+  };
+}
+
 function gauss() {
   let u = 0;
   let v = 0;
@@ -166,5 +195,5 @@ export function startDemo({ onFix, onYaw, onLoop, lateralG = 0.5, cruiseKmh = 80
     }
   }, dt * 1000);
 
-  return { stop: () => clearInterval(timer), origin, ways, course };
+  return { stop: () => clearInterval(timer), origin, ways, course, elevation: demoElevation(course, origin) };
 }

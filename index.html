@@ -43,6 +43,7 @@
             <div class="curve-main">
               <div class="curve-dist" id="next-dist">--</div>
               <div class="curve-r">R <b id="next-r">--</b></div>
+              <div class="curve-sub" id="next-elev"></div>
             </div>
             <div class="curve-speeds">
               <div><span>安全上限</span><b id="next-rec">--</b></div>
@@ -57,7 +58,7 @@
             <svg class="arrow" id="now-arrow" viewBox="0 0 48 48" aria-hidden="true"></svg>
             <div class="curve-main">
               <div class="curve-r">R <b id="now-r">--</b></div>
-              <div class="curve-sub">地図 R <span id="now-map-r">--</span></div>
+              <div class="curve-sub">地図 R <span id="now-map-r">--</span>・<span id="now-grade">勾配 --</span></div>
             </div>
             <div class="curve-speeds">
               <div><span>安全上限</span><b id="now-rec">--</b></div>
@@ -74,8 +75,9 @@
           <span>GPS <b id="st-gps">--</b></span>
           <span>地図 <b id="st-map">--</b></span>
           <span>R推定 <b id="st-src">--</b></span>
+          <span>標高 <b id="st-elev">--</b></span>
         </footer>
-        <p class="attribution">道路データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></p>
+        <p class="attribution">道路データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> ／ 標高 <a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank" rel="noopener">国土地理院</a></p>
       </section>
 
       <!-- ===== 計算 ===== -->
@@ -96,6 +98,19 @@
               <span>片勾配（カント）</span>
               <div class="with-unit"><input data-env="bankPct" type="number" inputmode="decimal" step="0.5" min="-10" max="15" /><em>%</em></div>
             </label>
+            <label class="field">
+              <span>入口の標高</span>
+              <div class="with-unit"><input id="calc-entry" type="number" inputmode="decimal" step="1" placeholder="未入力" /><em>m</em></div>
+            </label>
+            <label class="field">
+              <span>出口の標高</span>
+              <div class="with-unit"><input id="calc-exit" type="number" inputmode="decimal" step="1" placeholder="未入力" /><em>m</em></div>
+            </label>
+            <label class="field">
+              <span>曲がる角度</span>
+              <div class="with-unit"><input id="calc-angle" type="number" inputmode="decimal" min="1" max="360" step="5" /><em>°</em></div>
+            </label>
+            <p class="hint grade-hint wide" id="calc-grade"></p>
             <label class="field wide">
               <span>安全係数（限界横Gに対する割合） <b id="safety-label"></b></span>
               <input data-env="safety" type="range" min="0.3" max="0.9" step="0.05" />
@@ -247,6 +262,10 @@
               <input data-pref="map" type="checkbox" />
               <span>地図データ（OpenStreetMap）で前方のカーブを先読みする</span>
             </label>
+            <label class="field wide check">
+              <input data-pref="elevation" type="checkbox" />
+              <span>標高データ（国土地理院）でカーブの上り・下りを考慮する</span>
+            </label>
           </div>
         </article>
       </section>
@@ -268,6 +287,7 @@
           <ul>
             <li><b>この先のカーブ（地図）</b>：OpenStreetMap の道路形状に現在地を当てはめ、道なりに先読みして曲率を計算します。交差点では最も直進に近い道を選びます</li>
             <li><b>現在のカーブ（計測）</b>：ジャイロのヨーレート ω から R = v / ω、ジャイロが無ければ GPS の進行方位の変化率、さらに無ければ GPS 軌跡への円の当てはめで求めます</li>
+            <li><b>入口・出口の標高</b>：国土地理院の標高タイル（10m メッシュ）を道路に沿って引き、カーブの入口と出口の標高差から勾配を求めます（国外は AWS Terrain Tiles）。橋・トンネルは地表の標高が使えないので前後から補間します</li>
           </ul>
         </article>
 
@@ -281,7 +301,9 @@
             <li><b>全長</b>：ホイールベースを推定し、低速時の舵角・内輪差・最小回転半径の判定に使います</li>
             <li><b>駆動方式</b>：速度を保つための駆動力（空気抵抗＋転がり抵抗＋コーナリング抵抗）が駆動輪の摩擦円を消費します。オープンデフでは荷重の抜けた内輪が空転すると速度を維持できません</li>
             <li><b>片勾配</b>：路面の傾きによる法線力・横力の変化を考慮</li>
+            <li><b>上り・下り（入口と出口の標高差）</b>：重力の進行方向成分を、上りは駆動輪、下りはブレーキが負担し、その分だけ横に使えるグリップが減ります。さらに上りではフロント、下りではリアの荷重が抜けます（FF の上りコーナーでアンダー、下りでリアが軽くなるのはこのため）</li>
           </ul>
+          <p>緩い下りでは、一定速を保つための駆動力を重力が肩代わりするので、旋回そのものの限界はほとんど変わりません。下りコーナーで本当に厳しくなるのは<b>進入時の減速</b>と、<b>アクセルを抜いても速度が落ちない</b>ことです。走行画面の減速警告は、カーブまでの下り勾配ぶん必要な制動力を上乗せして判定しています</p>
           <p>「安全上限」は理論限界の横G に安全係数を掛けた速度、「設計速度」は道路構造令の R = V² / 127(i + f) から逆算した、その道路が想定している速度の目安です</p>
         </article>
 

@@ -11,6 +11,7 @@ import {
   findCurves,
   haversine,
 } from './geo.js';
+import { elevationProfile, gradeBetween } from './elevation.js';
 
 const HIGHWAY_TYPES = [
   'motorway',
@@ -44,6 +45,12 @@ function parseOneway(tags = {}) {
   return 0;
 }
 
+/** 橋・トンネル（地表の標高が使えない区間） */
+function isStructure(tags = {}) {
+  const yes = (v) => v != null && v !== 'no';
+  return yes(tags.bridge) || (yes(tags.tunnel) && tags.tunnel !== 'culvert') || tags.covered === 'yes';
+}
+
 const CELL = 60; // 空間インデックスのセルサイズ [m]
 
 export class RoadNetwork {
@@ -69,7 +76,8 @@ export class RoadNetwork {
       }
       if (pts.length < 2) continue;
       const wi = this.ways.length;
-      this.ways.push({ id: w.id, tags: w.tags || {}, oneway: parseOneway(w.tags), pts, nodes });
+      const tags = w.tags || {};
+      this.ways.push({ id: w.id, tags, oneway: parseOneway(tags), st: isStructure(tags), pts, nodes });
       nodes.forEach((nid, i) => {
         let list = this.nodeIndex.get(nid);
         if (!list) this.nodeIndex.set(nid, (list = []));
@@ -157,7 +165,7 @@ export class RoadNetwork {
    * @returns {{pts:{x:number,y:number}[], length:number, ways:number[]}}
    */
   walk(m, dir, maxDist, reverse = false) {
-    const pts = [{ x: m.x, y: m.y }];
+    const pts = [{ x: m.x, y: m.y, st: this.ways[m.w].st }];
     const ways = [m.w];
     let total = 0;
     let w = m.w;
@@ -173,13 +181,13 @@ export class RoadNetwork {
         if (seg > 0) {
           if (total + seg >= maxDist) {
             const t = (maxDist - total) / seg;
-            pts.push({ x: prevPt.x + (q.x - prevPt.x) * t, y: prevPt.y + (q.y - prevPt.y) * t });
+            pts.push({ x: prevPt.x + (q.x - prevPt.x) * t, y: prevPt.y + (q.y - prevPt.y) * t, st: way.st });
             return { pts, length: maxDist, ways };
           }
           lastBearing = bearingDeg(prevPt, q);
-          pts.push(q);
+          prevPt = { x: q.x, y: q.y, st: way.st };
+          pts.push(prevPt);
           total += seg;
-          prevPt = q;
         }
         i += d;
       }
@@ -271,8 +279,12 @@ export class RoadTracker {
    * @param {object} o
    * @param {(lat:number,lon:number,radius:number,opts:object)=>Promise<any[]>} [o.fetcher]
    */
-  constructor({ fetcher = fetchRoadsOverpass, radius = 1000, shift = 450, refetchAt = 500 } = {}) {
+  /**
+   * @param {object} [o.elevation] 標高プロバイダ（get(lat, lon) → m | null）。無ければ勾配は 0 扱い
+   */
+  constructor({ fetcher = fetchRoadsOverpass, radius = 1000, shift = 450, refetchAt = 500, elevation = null } = {}) {
     this.fetcher = fetcher;
+    this.elevation = elevation;
     this.radius = radius;
     this.shift = shift;
     this.refetchAt = refetchAt;
@@ -367,12 +379,21 @@ export class RoadTracker {
     this.prevMatch = m;
     const ahead = Math.max(250, Math.min(700, (motion.speed || 0) * 12));
     const prof = this.net.profile(m, ahead, 40, 5);
+    // 標高（入口・出口の高さ → 縦断勾配）
+    const net = this.net;
+    const elev = this.elevation
+      ? elevationProfile(prof.pts, (x, y) => net.proj.toLatLon(x, y), (la, lo) => this.elevation.get(la, lo), prof.ds)
+      : null;
+    prof.elev = elev;
     const curves = findCurves(prof.kappa, prof.ds, { thresholdR: 600 }).map((c) => ({
       ...c,
       // 現在地からの距離（負 = すでに入っている）
       distStart: (c.startIdx - prof.idx0) * prof.ds,
       distApex: (c.apexIdx - prof.idx0) * prof.ds,
       distEnd: (c.endIdx - prof.idx0) * prof.ds,
+      entryElev: elev ? elev[c.startIdx] : null,
+      exitElev: elev ? elev[c.endIdx] : null,
+      gradePct: elev ? gradeBetween(elev, c.startIdx, c.endIdx, prof.ds) : 0,
     }));
     const k0 = prof.kappa[prof.idx0] || 0;
     const info = this.net.wayInfo(m.w);
@@ -383,6 +404,10 @@ export class RoadTracker {
       curves: curves.filter((c) => c.distEnd >= 0),
       radiusHere: Math.abs(k0) > 1 / 1500 ? 1 / Math.abs(k0) : Infinity,
       dirHere: k0 > 0 ? 'left' : 'right',
+      hasElevation: !!elev,
+      elevHere: elev ? elev[prof.idx0] : null,
+      // 現在地の前後 25m で見た勾配
+      gradeHere: elev ? gradeBetween(elev, prof.idx0 - 5, prof.idx0 + 5, prof.ds) : 0,
     };
     return this.result;
   }

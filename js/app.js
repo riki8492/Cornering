@@ -3,6 +3,8 @@
 import * as P from './physics.js';
 import { MotionTracker, startGps, startGyro, requestMotionPermission } from './sensors.js';
 import { RoadTracker } from './roadmap.js';
+import { DemElevation, gradeBetween } from './elevation.js';
+import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
 
 const STORE_KEY = 'cornering.v1';
@@ -12,8 +14,9 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const state = {
   vehicle: { ...P.DEFAULT_VEHICLE },
   env: { ...P.DEFAULT_ENV },
-  prefs: { sound: false, gyro: true, map: true },
+  prefs: { sound: false, gyro: true, map: true, elevation: true },
   calcR: 50,
+  calc: { entryElev: null, exitElev: null, angleDeg: 90 },
   axleAuto: 'rearAxleKg', // 自動補完した側の軸重（手入力された値は上書きしない）
 };
 
@@ -25,6 +28,7 @@ function load() {
     Object.assign(state.env, s.env);
     Object.assign(state.prefs, s.prefs);
     if (Number(s.calcR) > 0) state.calcR = Number(s.calcR);
+    if (s.calc) Object.assign(state.calc, s.calc);
     if ('axleAuto' in s) state.axleAuto = s.axleAuto;
   } catch {
     /* 保存領域が使えなくても既定値で動く */
@@ -51,6 +55,16 @@ const fmtR = (R) => {
   return `${Math.round(R)} m`;
 };
 const fmtNum = (x, d = 0) => (Number.isFinite(x) ? x.toFixed(d) : '—');
+const fmtGrade = (g) => {
+  if (!Number.isFinite(g)) return '—';
+  if (Math.abs(g) < 1) return '平坦';
+  return g > 0 ? `上り ${g.toFixed(1)}%` : `下り ${(-g).toFixed(1)}%`;
+};
+/** 下りがきついときに目立たせる */
+const gradeHtml = (g) => {
+  const t = fmtGrade(g);
+  return g <= -4 ? `<span class="down">${t}</span>` : t;
+};
 
 const SOURCE_LABEL = {
   gyro: 'ジャイロ',
@@ -68,11 +82,12 @@ const MAP_STATUS = {
 
 // ---------- 車両の計算 ----------
 let veh = P.deriveVehicle(state.vehicle);
-let table = P.buildSpeedTable(veh, state.env);
+/** (R, 縦断勾配%) → {vLimit, vRec} */
+let speedAt = P.makeSpeedLookup(veh, state.env);
 
 function recompute() {
   veh = P.deriveVehicle(state.vehicle);
-  table = P.buildSpeedTable(veh, state.env);
+  speedAt = P.makeSpeedLookup(veh, state.env);
   renderDerived();
   renderAxleHint();
   renderCalc();
@@ -191,6 +206,19 @@ function bindForms() {
       renderCalc();
     }
   });
+  for (const [id, key] of [
+    ['#calc-entry', 'entryElev'],
+    ['#calc-exit', 'exitElev'],
+    ['#calc-angle', 'angleDeg'],
+  ]) {
+    const el = $(id);
+    writeInput(el, state.calc[key]);
+    el.addEventListener('input', () => {
+      state.calc[key] = readInput(el);
+      save();
+      renderCalc();
+    });
+  }
   const quick = $('#calc-quick');
   for (const R of [15, 30, 50, 80, 100, 150, 200, 300, 500]) {
     const b = document.createElement('button');
@@ -271,18 +299,50 @@ function renderDerived() {
   ]);
 }
 
+/** 計算タブの入口・出口標高と角度から勾配を求める */
+function calcGrade(R) {
+  const c = state.calc;
+  const angle = c.angleDeg > 0 ? c.angleDeg : 90;
+  const length = (R * angle * Math.PI) / 180;
+  const g = P.gradeFromElevations(c.entryElev, c.exitElev, length);
+  return { length, gradePct: g == null ? 0 : Math.max(-30, Math.min(30, g)), given: g != null };
+}
+
 function renderCalc() {
   const R = state.calcR;
-  const env = state.env;
+  const cg = calcGrade(R);
+  const env = { ...state.env, gradePct: cg.gradePct };
   $('#safety-label').textContent = `${Math.round((env.safety || 0) * 100)}%`;
+  $('#calc-grade').innerHTML = cg.given
+    ? `カーブ長 約 ${Math.round(cg.length)} m ／ 勾配 ${gradeHtml(cg.gradePct)}${Math.abs(cg.gradePct) >= 30 ? '（±30% で打ち切り）' : ''}`
+    : '入口と出口の標高を入れると上り・下りを考慮します';
   const s = P.solveCorner(R, veh, env);
   $('#res-rec').textContent = fmtKmh(s.vRec);
   $('#res-lim').textContent = fmtKmh(s.vLimit);
   const geo = P.lowSpeedGeometry(R, veh);
   const design = P.roadDesignSpeedKmh(R, env.bankPct);
-  kvRows($('#res-detail'), [
+  const rows = [
     ['限界横G', `${fmtNum(s.aLatG, 2)} G`],
     ['限界を決める要因', P.LIMIT_LABELS[s.limitedBy] || '—'],
+  ];
+  if (cg.given) {
+    const flat = P.solveCorner(R, veh, { ...state.env, gradePct: 0 });
+    const diff = Math.round((s.vLimit - flat.vLimit) * 3.6);
+    rows.push(['縦断勾配', fmtGrade(cg.gradePct)]);
+    rows.push(['平坦路との差（理論限界）', `${diff > 0 ? '+' : ''}${diff} km/h（平坦なら ${fmtKmh(flat.vLimit)}）`]);
+  }
+  if (s.vRec > 0 && Number.isFinite(s.vRec)) {
+    // 安全上限で一定速を保つのに必要な前後力（下りでは制動）
+    const e = P.evaluateCorner(s.vRec, R, veh, env);
+    const gx = e.fx / (veh.m * P.G);
+    rows.push([
+      '安全上限で速度を保つのに必要な力',
+      gx >= 0 ? `駆動 ${gx.toFixed(2)} G` : `ブレーキ ${(-gx).toFixed(2)} G`,
+      gx < -0.03 ? 'bad' : '',
+    ]);
+  }
+  kvRows($('#res-detail'), [
+    ...rows,
     ['転覆限界速度', `${fmtKmh(s.vRollover)} km/h`],
     [
       `道路の設計速度の目安${env.bankPct > 0 ? '' : '（片勾配6%想定）'}`,
@@ -299,13 +359,15 @@ function renderCalc() {
     ],
   ]);
 
-  $('#table-cond').textContent = `${P.SURFACES[env.surface]?.label || ''}・片勾配 ${env.bankPct || 0}%`;
+  $('#table-cond').textContent =
+    `${P.SURFACES[env.surface]?.label || ''}・片勾配 ${env.bankPct || 0}%` +
+    (cg.given ? `・${fmtGrade(cg.gradePct)}` : '');
   const tbody = $('#speed-table');
   tbody.innerHTML = '';
   const Rs = [10, 15, 20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 300, 400, 600, 1000];
   let nearest = Rs[0];
   for (const r of Rs) if (Math.abs(Math.log(r / R)) < Math.abs(Math.log(nearest / R))) nearest = r;
-  const shortLabel = { front: 'フロント', rear: 'リア', traction: '空転', rollover: '転覆', cap: '—' };
+  const shortLabel = { front: 'フロント', rear: 'リア', traction: '空転', braking: '制動', rollover: '転覆', cap: '—' };
   for (const r of Rs) {
     const x = P.solveCorner(r, veh, env);
     const tr = document.createElement('tr');
@@ -328,6 +390,20 @@ function renderCalc() {
 // ---------- 走行 ----------
 const motion = new MotionTracker();
 let road = new RoadTracker();
+let dem = null;
+let gradeFallback = null; // 地図が無いときの、進行方向の前後から見た勾配 [%]
+
+/** 地図が使えないときの代わり：進行方向の前後 25m の標高差から勾配を推定 */
+function demGradeAlongHeading(fix, heading) {
+  if (!dem || heading == null) return null;
+  const p = makeProjector(fix.lat, fix.lon);
+  const h = (heading * Math.PI) / 180;
+  const a = p.toLatLon(-25 * Math.sin(h), -25 * Math.cos(h));
+  const b = p.toLatLon(25 * Math.sin(h), 25 * Math.cos(h));
+  const ea = dem.get(a.lat, a.lon);
+  const eb = dem.get(b.lat, b.lon);
+  return Number.isFinite(ea) && Number.isFinite(eb) ? ((eb - ea) / 50) * 100 : null;
+}
 let mode = 'off'; // 'off' | 'gps' | 'demo'
 let stopGps = null;
 let stopGyro = null;
@@ -341,6 +417,9 @@ function onFix(fix) {
   lastFixAt = Date.now();
   gpsError = '';
   road.update(fix, motion.state);
+  const g = road.result?.hasElevation || motion.speed < 2 ? null : demGradeAlongHeading(fix, motion.heading);
+  // DEM のメッシュ由来のガタつきを時間方向にならす
+  gradeFallback = g == null ? null : gradeFallback == null ? g : gradeFallback + (g - gradeFallback) * 0.3;
   scheduleRender();
 }
 
@@ -386,9 +465,9 @@ async function start(kind) {
   if (state.prefs.sound) ensureAudio();
   motion.reset();
   gpsError = '';
+  gradeFallback = null;
   mode = kind;
   if (kind === 'demo') {
-    road = new RoadTracker({ fetcher: null });
     demo = startDemo({
       onFix,
       onYaw: (w, t) => motion.setYawRate(w, t),
@@ -397,9 +476,13 @@ async function start(kind) {
         road.reset();
       },
     });
+    dem = state.prefs.elevation ? demo.elevation : null;
+    road = new RoadTracker({ fetcher: null, elevation: dem });
     road.setStaticNetwork(demo.ways, demo.origin);
   } else {
-    road = new RoadTracker(state.prefs.map ? {} : { fetcher: null });
+    if (state.prefs.elevation && !(dem instanceof DemElevation)) dem = new DemElevation();
+    if (!state.prefs.elevation) dem = null;
+    road = new RoadTracker({ ...(state.prefs.map ? {} : { fetcher: null }), elevation: dem });
     // iOS ではクリック処理の中で許可を求める必要がある
     const motionOk = state.prefs.gyro ? requestMotionPermission() : Promise.resolve(false);
     stopGps = startGps(onFix, onGpsError);
@@ -481,17 +564,20 @@ function computeAlert(v, nowSpeeds, rr) {
   };
   if (v > nowSpeeds.vLimit) raise('danger', '限界速度を超えています');
   if (rr) {
-    const { kappa, ds, idx0 } = rr.profile;
+    const { kappa, ds, idx0, elev } = rr.profile;
     let worst = null;
     for (let j = idx0 + 1; j < kappa.length; j++) {
       const d = (j - idx0) * ds;
       if (d < 20) continue; // 目の前は「現在のカーブ」で判定する
       const k = Math.abs(kappa[j]);
-      if (k < 1 / 3000) continue;
-      const s = table.lookup(1 / k);
-      const aRec = (v * v - s.vRec * s.vRec) / (2 * d);
-      const aLim = (v * v - s.vLimit * s.vLimit) / (2 * d);
-      if (!worst || aRec > worst.aRec) worst = { aRec, aLim, d, vRec: s.vRec, R: 1 / k };
+      if (k < 1 / 1500) continue;
+      const s = speedAt(1 / k, elev ? gradeBetween(elev, j - 3, j + 3, ds) : 0);
+      if (v <= s.vRec) continue;
+      // カーブまでが下りなら、同じ減速でも余分に制動力が要る（上りなら少なくて済む）
+      const slope = elev ? (elev[j] - elev[idx0]) / d : 0;
+      const aRec = (v * v - s.vRec * s.vRec) / (2 * d) - P.G * slope;
+      const aLim = (v * v - s.vLimit * s.vLimit) / (2 * d) - P.G * slope;
+      if (!worst || aRec > worst.aRec) worst = { aRec, aLim, d, vRec: s.vRec, R: 1 / k, slope };
     }
     if (worst && worst.aRec > 0) {
       if (worst.aLim > 0.55 * P.G) {
@@ -499,7 +585,7 @@ function computeAlert(v, nowSpeeds, rr) {
       } else if (worst.aRec > 0.3 * P.G) {
         raise(
           'brake',
-          `減速：${Math.round(worst.d)} m で ${fmtKmh(worst.vRec)} km/h へ（${(worst.aRec / P.G).toFixed(2)} G）`,
+          `${worst.slope <= -0.03 ? '下り・' : ''}減速：${Math.round(worst.d)} m で ${fmtKmh(worst.vRec)} km/h へ（${(worst.aRec / P.G).toFixed(2)} G）`,
         );
       }
     }
@@ -570,16 +656,16 @@ function drawPreview(rr, ms) {
   }
 
   const v = ms.speed;
-  const colorFor = (k) => {
+  const colorFor = (k, grade = 0) => {
     if (Math.abs(k) < 1 / 600) return '#3b4a5c';
-    const s = table.lookup(1 / Math.abs(k));
+    const s = speedAt(1 / Math.abs(k), grade);
     if (v > s.vLimit) return cssVar('--danger');
     if (v > s.vRec) return cssVar('--warn');
     return cssVar('--accent');
   };
 
   if (rr) {
-    const { pts, kappa, idx0 } = rr.profile;
+    const { pts, kappa, idx0, ds, elev } = rr.profile;
     const o = pts[idx0];
     const a = pts[Math.max(0, idx0 - 1)];
     const b = pts[Math.min(pts.length - 1, idx0 + 2)];
@@ -594,7 +680,7 @@ function drawPreview(rr, ms) {
     ctx.lineCap = 'round';
     ctx.lineWidth = 7;
     for (let i = 1; i < pts.length; i++) {
-      ctx.strokeStyle = i <= idx0 ? '#2a3542' : colorFor(kappa[i]);
+      ctx.strokeStyle = i <= idx0 ? '#2a3542' : colorFor(kappa[i], elev ? gradeBetween(elev, i - 3, i + 3, ds) : 0);
       ctx.beginPath();
       ctx.moveTo(...tx(pts[i - 1]));
       ctx.lineTo(...tx(pts[i]));
@@ -605,7 +691,8 @@ function drawPreview(rr, ms) {
       if (cv2.distApex < 0) continue;
       const [x, y] = tx(pts[cv2.apexIdx]);
       if (y < 0 || x < 0 || x > w) continue;
-      const label = `R${Math.round(cv2.R)}`;
+      const g = cv2.gradePct || 0;
+      const label = `R${Math.round(cv2.R)}${Math.abs(g) >= 2 ? (g > 0 ? ' ↗' : ' ↘') + Math.abs(g).toFixed(0) + '%' : ''}`;
       const off = cv2.dir === 'left' ? -12 - ctx.measureText(label).width : 12;
       ctx.fillStyle = cssVar('--text');
       ctx.fillText(label, x + off, y + 4);
@@ -615,7 +702,7 @@ function drawPreview(rr, ms) {
     const k = motion.kappa;
     ctx.setLineDash([8, 8]);
     ctx.lineWidth = 4;
-    ctx.strokeStyle = colorFor(k);
+    ctx.strokeStyle = colorFor(k, road.result?.gradeHere || 0);
     ctx.beginPath();
     for (let sPos = 0; sPos <= range; sPos += 5) {
       const x = Math.abs(k) < 1e-6 ? 0 : -(1 - Math.cos(k * sPos)) / k;
@@ -660,7 +747,10 @@ function renderDrive() {
 
   // 現在のカーブ（計測値）
   const Rnow = hasFix ? ms.radius : NaN;
-  const nowS = Number.isFinite(Rnow) ? table.lookup(Rnow) : { vLimit: Infinity, vRec: Infinity };
+  const gradeNow = rr?.hasElevation ? rr.gradeHere : (gradeFallback ?? 0);
+  const nowS = Number.isFinite(Rnow) ? speedAt(Rnow, gradeNow) : { vLimit: Infinity, vRec: Infinity };
+  $('#now-grade').innerHTML =
+    rr?.hasElevation || gradeFallback != null ? gradeHtml(gradeNow) : '勾配 --';
   $('#now-r').textContent = hasFix ? fmtR(Rnow) : '--';
   $('#now-map-r').textContent = rr ? fmtR(rr.radiusHere) : '--';
   $('#now-rec').textContent = hasFix ? fmtKmh(nowS.vRec) : '--';
@@ -672,8 +762,12 @@ function renderDrive() {
   // この先のカーブ（地図）
   const nc = nextCurve(rr);
   if (nc) {
-    const s = table.lookup(nc.R);
+    const s = speedAt(nc.R, nc.gradePct);
     $('#next-dist').textContent = nc.distStart > 0 ? `${Math.round(nc.distStart)} m 先` : 'カーブ中';
+    $('#next-elev').innerHTML =
+      nc.entryElev != null
+        ? `標高 ${Math.round(nc.entryElev)} → ${Math.round(nc.exitElev)} m・${gradeHtml(nc.gradePct)}`
+        : '';
     $('#next-r').textContent = fmtR(nc.R);
     $('#next-rec').textContent = fmtKmh(s.vRec);
     $('#next-lim').textContent = fmtKmh(s.vLimit);
@@ -691,6 +785,7 @@ function renderDrive() {
             : '道路未特定';
     $('#next-dist').textContent = why;
     $('#next-r').textContent = '--';
+    $('#next-elev').textContent = '';
     $('#next-rec').textContent = '--';
     $('#next-lim').textContent = '--';
     $('#next-arrow').innerHTML = arrowSvg(null, Infinity);
@@ -728,6 +823,13 @@ function renderDrive() {
         : `${MAP_STATUS[road.status] || road.status}${road.loading && road.net ? '（更新中）' : ''}`;
   $('#st-map').textContent = mapState;
   $('#st-src').textContent = SOURCE_LABEL[ms.source] || '--';
+  $('#st-elev').textContent = !state.prefs.elevation
+    ? 'オフ'
+    : !running || !dem
+      ? '--'
+      : dem.status === 'ready' || rr?.hasElevation || gradeFallback != null
+        ? `OK${dem.source ? `（${dem.source}）` : ''}`
+        : MAP_STATUS[dem.status] || dem.status;
 
   if ($('#view-drive').classList.contains('active')) drawPreview(rr, ms);
 }

@@ -120,10 +120,13 @@ export function polylineLength(pts) {
   return s;
 }
 
-/** 折れ線を等間隔 ds で再サンプリング（最初の点を含む） */
+/**
+ * 折れ線を等間隔 ds で再サンプリング（最初の点を含む）
+ * 入力点に st（橋・トンネルなどの属性）があれば、その点で終わる区間の値を引き継ぐ
+ */
 export function resample(pts, ds) {
   if (pts.length === 0) return [];
-  const out = [{ x: pts[0].x, y: pts[0].y }];
+  const out = [{ x: pts[0].x, y: pts[0].y, st: pts[0].st }];
   let carry = 0; // 直前の出力点から現在セグメント始点までの距離
   for (let i = 1; i < pts.length; i++) {
     const a = pts[i - 1];
@@ -132,7 +135,7 @@ export function resample(pts, ds) {
     if (len === 0) continue;
     let t = ds - carry;
     while (t <= len + 1e-9) {
-      out.push({ x: a.x + ((b.x - a.x) * t) / len, y: a.y + ((b.y - a.y) * t) / len });
+      out.push({ x: a.x + ((b.x - a.x) * t) / len, y: a.y + ((b.y - a.y) * t) / len, st: b.st });
       t += ds;
     }
     carry = len - (t - ds);

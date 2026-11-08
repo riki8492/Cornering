@@ -9,6 +9,8 @@
 //   - 駆動方式：速度維持に必要な駆動力（空気抵抗・転がり抵抗・コーナリング抵抗）が
 //     駆動輪の摩擦円を食う。オープンデフでは内輪の空転も判定
 //   - 片勾配（カント）
+//   - 縦断勾配（コーナー入口と出口の標高差）：重力の進行方向成分を、上りは駆動輪、
+//     下りは制動輪が負担する。前後の荷重移動（上りはリア、下りはフロントに荷重が乗る）も考慮
 //   - 転覆限界（静的安定係数 SSF = トレッド / (2 × 重心高)）
 // 全て国際単位系（m, kg, s, N）。速度は m/s。
 
@@ -132,6 +134,7 @@ export const DEFAULT_VEHICLE = {
 export const DEFAULT_ENV = {
   surface: 'dry',
   bankPct: 0,
+  gradePct: 0, // 縦断勾配 [%]（上りが正）
   safety: 0.5,
 };
 
@@ -259,6 +262,8 @@ export function deriveVehicle(input = {}) {
     ssf: track / (2 * cgHeight),
     drivetrain: p.drivetrain in DRIVETRAINS ? p.drivetrain : 'FF',
     driveFront: drive.driveFront,
+    // 下りで速度を保つための制動は、前寄りのブレーキ配分（前軸重比 +10%）で負担すると仮定
+    brakeFront: clamp(fr + 0.1, 0.5, 0.8),
     lsd: !!p.lsd,
     tireKey: p.tire in TIRES ? p.tire : 'standard',
     tire,
@@ -285,6 +290,7 @@ export function wheelCapacity(fz, mu0, fz0, k) {
  * @returns {{capacity:number, tractionOk:boolean}}
  */
 function axleLateralCapacity(nAxle, dW, fx, mu0, veh, lsd) {
+  if (!(nAxle > 0)) return { capacity: 0, tractionOk: fx <= 0 };
   const k = veh.tire.loadSens;
   const fzOut = nAxle / 2 + dW;
   const fzIn = nAxle / 2 - dW;
@@ -318,10 +324,13 @@ function axleLateralCapacity(nAxle, dW, fx, mu0, veh, lsd) {
  */
 export function evaluateCorner(v, R, veh, env = DEFAULT_ENV, opts = {}) {
   const theta = Math.atan((Number(env.bankPct) || 0) / 100);
+  const phi = Math.atan((Number(env.gradePct) || 0) / 100);
+  // 勾配があると、重力のうち路面に垂直な成分は g·cosφ になる
+  const gN = G * Math.cos(phi);
   const ac = (v * v) / R;
-  const aLatSigned = ac * Math.cos(theta) - G * Math.sin(theta);
+  const aLatSigned = ac * Math.cos(theta) - gN * Math.sin(theta);
   const aLat = Math.abs(aLatSigned);
-  const aN = G * Math.cos(theta) + ac * Math.sin(theta);
+  const aN = gN * Math.cos(theta) + ac * Math.sin(theta);
   const m = veh.m;
   const fr = veh.frontRatio;
   const mu0 = baseMu(veh, env.surface);
@@ -329,10 +338,17 @@ export function evaluateCorner(v, R, veh, env = DEFAULT_ENV, opts = {}) {
   const ratio = aLat / aN;
   const rollover = opts.ignoreRollover ? false : ratio >= veh.ssf * ROLLOVER_FACTOR;
 
+  const surface = SURFACES[env.surface] || SURFACES.dry;
+  const fAero = 0.5 * RHO_AIR * veh.cd * veh.frontalArea * v * v;
+  const fGrade = m * G * Math.sin(phi); // 上りで正（後ろ向きの力）
+
   const N = m * aN;
-  const nF = N * fr;
-  const nR = N * (1 - fr);
+  // 前後の荷重移動：路面から受ける前後方向の正味の力（空気抵抗＋勾配抵抗）が重心高で作るモーメント
+  const dWx = ((fAero + fGrade) * veh.cgHeight) / veh.wheelbase;
+  const nF = N * fr - dWx;
+  const nR = N * (1 - fr) + dWx;
   const fy = m * aLat;
+  // 横力の前後分担は重心位置で決まる（ヨーモーメントの釣り合い）ので静的配分のまま
   const fyF = fy * fr;
   const fyR = fy * (1 - fr);
 
@@ -350,25 +366,30 @@ export function evaluateCorner(v, R, veh, env = DEFAULT_ENV, opts = {}) {
     dWr = nR / 2;
   }
 
-  // 一定速度を保つのに必要な駆動力
-  const surface = SURFACES[env.surface] || SURFACES.dry;
-  const fAero = 0.5 * RHO_AIR * veh.cd * veh.frontalArea * v * v;
+  // 一定速度を保つのに必要な前後力（正 = 駆動、負 = 制動）
   const fRoll = surface.crr * N;
   const fCorner = fy * Math.sin((veh.tire.alphaPeakDeg * Math.PI) / 180);
-  const fx = fAero + fRoll + fCorner;
-  const fxF = fx * veh.driveFront;
-  const fxR = fx * (1 - veh.driveFront);
-
-  const front = axleLateralCapacity(nF, dWf, fxF, mu0, veh, veh.lsd);
-  const rear = axleLateralCapacity(nR, dWr, fxR, mu0, veh, veh.lsd);
+  const fx = fAero + fRoll + fCorner + fGrade;
+  const braking = fx < 0;
+  let front;
+  let rear;
+  if (braking) {
+    // ブレーキは ABS が効く前提で、各輪のグリップに応じて配分されるとみなす
+    const b = -fx;
+    front = axleLateralCapacity(nF, dWf, b * veh.brakeFront, mu0, veh, true);
+    rear = axleLateralCapacity(nR, dWr, b * (1 - veh.brakeFront), mu0, veh, true);
+  } else {
+    front = axleLateralCapacity(nF, dWf, fx * veh.driveFront, mu0, veh, veh.lsd);
+    rear = axleLateralCapacity(nR, dWr, fx * (1 - veh.driveFront), mu0, veh, veh.lsd);
+  }
 
   const frontMargin = front.capacity - fyF;
   const rearMargin = rear.capacity - fyR;
-  const tractionOk = front.tractionOk && rear.tractionOk;
+  const tractionOk = front.tractionOk && rear.tractionOk && nF > 0 && nR > 0;
 
   let limitedBy = null;
   if (rollover) limitedBy = 'rollover';
-  else if (!tractionOk) limitedBy = 'traction';
+  else if (!tractionOk) limitedBy = braking ? 'braking' : 'traction';
   else if (frontMargin < 0 || rearMargin < 0) {
     limitedBy = frontMargin / Math.max(fyF, 1) <= rearMargin / Math.max(fyR, 1) ? 'front' : 'rear';
   }
@@ -384,6 +405,9 @@ export function evaluateCorner(v, R, veh, env = DEFAULT_ENV, opts = {}) {
     fx,
     fAero,
     fCorner,
+    fGrade,
+    frontLoad: nF,
+    rearLoad: nR,
     innerFrontLoad: nF / 2 - dWf,
     innerRearLoad: nR / 2 - dWr,
   };
@@ -391,18 +415,19 @@ export function evaluateCorner(v, R, veh, env = DEFAULT_ENV, opts = {}) {
 
 /** 転覆限界速度（グリップは無限と仮定） */
 export function rolloverSpeed(R, veh, env = DEFAULT_ENV) {
-  return speedForRatio(R, veh.ssf * ROLLOVER_FACTOR, env.bankPct);
+  return speedForRatio(R, veh.ssf * ROLLOVER_FACTOR, env.bankPct, env.gradePct);
 }
 
 /**
- * 片勾配 bankPct の路面で、横加速度/法線加速度 = ratio となる速度
- * v² = gR (r cosθ + sinθ) / (cosθ − r sinθ)
+ * 片勾配 bankPct・縦断勾配 gradePct の路面で、横加速度/法線加速度 = ratio となる速度
+ * v² = g·cosφ·R (r cosθ + sinθ) / (cosθ − r sinθ)
  */
-export function speedForRatio(R, ratio, bankPct = 0) {
+export function speedForRatio(R, ratio, bankPct = 0, gradePct = 0) {
   const theta = Math.atan((Number(bankPct) || 0) / 100);
+  const phi = Math.atan((Number(gradePct) || 0) / 100);
   const den = Math.cos(theta) - ratio * Math.sin(theta);
   if (den <= 0) return Infinity;
-  const num = G * R * (ratio * Math.cos(theta) + Math.sin(theta));
+  const num = G * Math.cos(phi) * R * (ratio * Math.cos(theta) + Math.sin(theta));
   return num <= 0 ? 0 : Math.sqrt(num / den);
 }
 
@@ -432,7 +457,8 @@ export function solveCorner(R, veh, env = DEFAULT_ENV) {
   }
 
   const theta = Math.atan((Number(env.bankPct) || 0) / 100);
-  const vBal = Math.sqrt(Math.max(0, G * R * Math.tan(theta)));
+  const phi = Math.atan((Number(env.gradePct) || 0) / 100);
+  const vBal = Math.sqrt(Math.max(0, G * Math.cos(phi) * R * Math.tan(theta)));
   const feasible = (v) => evaluateCorner(v, R, veh, env).ok;
 
   let lo = vBal;
@@ -470,7 +496,7 @@ export function solveCorner(R, veh, env = DEFAULT_ENV) {
   const beyond = evaluateCorner(hi + 1e-3, R, veh, env);
   const limitedBy = vLimit >= V_CAP ? 'cap' : beyond.limitedBy || 'front';
   const muEff = atLimit.ratio;
-  const vRec = Math.min(vLimit, speedForRatio(R, muEff * safety, env.bankPct));
+  const vRec = Math.min(vLimit, speedForRatio(R, muEff * safety, env.bankPct, env.gradePct));
 
   return {
     R,
@@ -514,6 +540,43 @@ export function buildSpeedTable(veh, env = DEFAULT_ENV) {
     };
   };
   return { rows, lookup };
+}
+
+/**
+ * 半径と縦断勾配から速度を引く関数を作る。勾配 1% 刻みの表を必要になった時点で作り、間を補間する
+ * @returns {(R:number, gradePct?:number) => {vLimit:number, vRec:number, limitedBy?:string}}
+ */
+export function makeSpeedLookup(veh, env = DEFAULT_ENV) {
+  const cache = new Map();
+  const tableFor = (g) => {
+    let t = cache.get(g);
+    if (!t) cache.set(g, (t = buildSpeedTable(veh, { ...env, gradePct: g })));
+    return t;
+  };
+  return (R, gradePct = 0) => {
+    const g = clamp(Number(gradePct) || 0, -30, 30);
+    const g0 = Math.floor(g);
+    const g1 = Math.ceil(g);
+    const a = tableFor(g0).lookup(R);
+    if (g1 === g0) return a;
+    const b = tableFor(g1).lookup(R);
+    const t = g - g0;
+    const mix = (x, y) => (Number.isFinite(x) && Number.isFinite(y) ? x + (y - x) * t : t < 0.5 ? x : y);
+    return {
+      vLimit: mix(a.vLimit, b.vLimit),
+      vRec: mix(a.vRec, b.vRec),
+      limitedBy: t < 0.5 ? a.limitedBy : b.limitedBy,
+    };
+  };
+}
+
+/**
+ * 入口・出口の標高と、カーブの長さ（または R と曲がる角度）から縦断勾配 [%] を求める
+ * @returns {number|null} 求められなければ null
+ */
+export function gradeFromElevations(entryM, exitM, lengthM) {
+  if (!Number.isFinite(entryM) || !Number.isFinite(exitM) || !(lengthM > 0)) return null;
+  return ((exitM - entryM) / lengthM) * 100;
 }
 
 // 道路構造令の横すべり摩擦係数 f（設計速度別）
@@ -573,6 +636,7 @@ export const LIMIT_LABELS = {
   front: 'フロントのグリップ限界（アンダーステア）',
   rear: 'リアのグリップ限界（オーバーステア）',
   traction: '駆動輪の空転（内輪の荷重抜け・摩擦円の不足）',
+  braking: '制動輪のグリップ不足（下り勾配で速度を保てない）',
   rollover: '転覆（横転）限界',
   cap: '計算上限',
 };
