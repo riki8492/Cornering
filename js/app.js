@@ -1,0 +1,773 @@
+// 画面の制御
+
+import * as P from './physics.js';
+import { MotionTracker, startGps, startGyro, requestMotionPermission } from './sensors.js';
+import { RoadTracker } from './roadmap.js';
+import { startDemo } from './sim.js';
+
+const STORE_KEY = 'cornering.v1';
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => [...document.querySelectorAll(sel)];
+
+const state = {
+  vehicle: { ...P.DEFAULT_VEHICLE },
+  env: { ...P.DEFAULT_ENV },
+  prefs: { sound: false, gyro: true, map: true },
+  calcR: 50,
+  axleAuto: 'rearAxleKg', // 自動補完した側の軸重（手入力された値は上書きしない）
+};
+
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    if (!s) return;
+    Object.assign(state.vehicle, s.vehicle);
+    Object.assign(state.env, s.env);
+    Object.assign(state.prefs, s.prefs);
+    if (Number(s.calcR) > 0) state.calcR = Number(s.calcR);
+    if ('axleAuto' in s) state.axleAuto = s.axleAuto;
+  } catch {
+    /* 保存領域が使えなくても既定値で動く */
+  }
+}
+
+function save() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state));
+  } catch {
+    /* 無視 */
+  }
+}
+
+// ---------- 表示用の整形 ----------
+const fmtKmh = (v) => {
+  if (!Number.isFinite(v)) return '—';
+  const k = v * 3.6;
+  return k >= 300 ? '300+' : String(Math.round(k));
+};
+const fmtR = (R) => {
+  if (!Number.isFinite(R) || R >= 1500) return '直線';
+  if (R >= 1000) return `${(R / 1000).toFixed(1)} km`;
+  return `${Math.round(R)} m`;
+};
+const fmtNum = (x, d = 0) => (Number.isFinite(x) ? x.toFixed(d) : '—');
+
+const SOURCE_LABEL = {
+  gyro: 'ジャイロ',
+  'gps-course': 'GPS方位',
+  'gps-track': 'GPS軌跡',
+};
+
+const MAP_STATUS = {
+  idle: '未取得',
+  loading: '読込中…',
+  ready: 'OK',
+  error: '取得失敗',
+  'no-road': '道路外',
+};
+
+// ---------- 車両の計算 ----------
+let veh = P.deriveVehicle(state.vehicle);
+let table = P.buildSpeedTable(veh, state.env);
+
+function recompute() {
+  veh = P.deriveVehicle(state.vehicle);
+  table = P.buildSpeedTable(veh, state.env);
+  renderDerived();
+  renderAxleHint();
+  renderCalc();
+  renderSurfaceChips();
+  scheduleRender();
+}
+
+// ---------- フォーム ----------
+function fillSelect(sel, entries, value) {
+  sel.innerHTML = '';
+  for (const [key, obj] of Object.entries(entries)) {
+    const o = document.createElement('option');
+    o.value = key;
+    o.textContent = obj.label;
+    sel.append(o);
+  }
+  sel.value = value;
+}
+
+function readInput(el) {
+  if (el.type === 'checkbox') return el.checked;
+  if (el.tagName === 'SELECT') return el.value;
+  if (el.value === '') return null;
+  const n = Number(el.value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function writeInput(el, v) {
+  if (el.type === 'checkbox') el.checked = !!v;
+  else el.value = v == null ? '' : v;
+}
+
+const vehInput = (key) => $(`[data-veh="${key}"]`);
+
+function syncAxles(changed) {
+  const v = state.vehicle;
+  const m = v.massKg;
+  const other = { frontAxleKg: 'rearAxleKg', rearAxleKg: 'frontAxleKg' };
+  if (changed in other) {
+    // 手で触った側は手入力扱い。もう一方が空欄か自動補完なら埋める
+    const o = other[changed];
+    if (state.axleAuto === changed) state.axleAuto = null;
+    if (m > 0 && v[changed] > 0 && v[changed] < m && (v[o] == null || state.axleAuto === o)) {
+      v[o] = Math.round(m - v[changed]);
+      state.axleAuto = o;
+      writeInput(vehInput(o), v[o]);
+    }
+  } else if (changed === 'massKg' && state.axleAuto && m > 0) {
+    const o = state.axleAuto;
+    const fixed = o === 'rearAxleKg' ? v.frontAxleKg : v.rearAxleKg;
+    if (fixed > 0 && fixed < m) {
+      v[o] = Math.round(m - fixed);
+      writeInput(vehInput(o), v[o]);
+    }
+  }
+}
+
+function estimateAxles() {
+  const v = state.vehicle;
+  const m = v.massKg > 0 ? v.massKg : P.DEFAULT_VEHICLE.massKg;
+  const ratio = (P.DRIVETRAINS[v.drivetrain] || P.DRIVETRAINS.FF).defaultFrontRatio;
+  v.frontAxleKg = Math.round((m * ratio) / 10) * 10;
+  v.rearAxleKg = m - v.frontAxleKg;
+  state.axleAuto = 'rearAxleKg';
+  writeInput(vehInput('frontAxleKg'), v.frontAxleKg);
+  writeInput(vehInput('rearAxleKg'), v.rearAxleKg);
+  save();
+  recompute();
+}
+
+function bindForms() {
+  fillSelect(vehInput('drivetrain'), P.DRIVETRAINS, state.vehicle.drivetrain);
+  fillSelect(vehInput('tire'), P.TIRES, state.vehicle.tire);
+  fillSelect(vehInput('wear'), P.WEAR, state.vehicle.wear);
+  fillSelect($('[data-env="surface"]'), P.SURFACES, state.env.surface);
+
+  for (const el of $$('[data-veh]')) {
+    const key = el.dataset.veh;
+    writeInput(el, state.vehicle[key]);
+    el.addEventListener(el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      state.vehicle[key] = readInput(el);
+      syncAxles(key);
+      save();
+      recompute();
+    });
+  }
+  for (const el of $$('[data-env]')) {
+    const key = el.dataset.env;
+    writeInput(el, state.env[key]);
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      const v = readInput(el);
+      state.env[key] = key === 'bankPct' ? v ?? 0 : v;
+      save();
+      recompute();
+    });
+  }
+  for (const el of $$('[data-pref]')) {
+    const key = el.dataset.pref;
+    writeInput(el, state.prefs[key]);
+    el.addEventListener('change', () => {
+      state.prefs[key] = el.checked;
+      if (key === 'sound' && el.checked) ensureAudio();
+      save();
+    });
+  }
+
+  $('#btn-axle-estimate').addEventListener('click', estimateAxles);
+
+  const rInput = $('#calc-r');
+  rInput.value = state.calcR;
+  rInput.addEventListener('input', () => {
+    const v = Number(rInput.value);
+    if (v > 0) {
+      state.calcR = v;
+      save();
+      renderCalc();
+    }
+  });
+  const quick = $('#calc-quick');
+  for (const R of [15, 30, 50, 80, 100, 150, 200, 300, 500]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = `R${R}`;
+    b.addEventListener('click', () => {
+      state.calcR = R;
+      rInput.value = R;
+      save();
+      renderCalc();
+    });
+    quick.append(b);
+  }
+}
+
+function renderSurfaceChips() {
+  const box = $('#surface-chips');
+  if (!box.childElementCount) {
+    for (const [key, s] of Object.entries(P.SURFACES)) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'radio');
+      b.dataset.surface = key;
+      b.textContent = s.label;
+      b.addEventListener('click', () => {
+        state.env.surface = key;
+        $('[data-env="surface"]').value = key;
+        save();
+        recompute();
+      });
+      box.append(b);
+    }
+  }
+  for (const b of box.children) b.setAttribute('aria-checked', String(b.dataset.surface === state.env.surface));
+}
+
+function renderAxleHint() {
+  const v = state.vehicle;
+  const el = $('#axle-hint');
+  const pct = Math.round(veh.frontRatio * 100);
+  let msg = `前後配分（乗員込み） ${pct} : ${100 - pct}`;
+  if (veh.axleSource === 'drivetrain') msg += '（駆動方式からの推定値）';
+  if (v.frontAxleKg > 0 && v.rearAxleKg > 0 && v.massKg > 0) {
+    const diff = v.frontAxleKg + v.rearAxleKg - v.massKg;
+    if (Math.abs(diff) > 30) msg += ` ／ 軸重の合計が車両重量と ${diff > 0 ? '+' : ''}${diff} kg 違います（配分比だけ使います）`;
+  }
+  el.textContent = msg;
+}
+
+function kvRows(dl, rows) {
+  dl.innerHTML = '';
+  for (const [k, v, cls] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = k;
+    const dd = document.createElement('dd');
+    dd.textContent = v;
+    if (cls) dd.className = cls;
+    dl.append(dt, dd);
+  }
+}
+
+function renderDerived() {
+  const est = (key) => (Number(state.vehicle[key]) > 0 ? '' : '（推定）');
+  const pct = Math.round(veh.frontRatio * 100);
+  kvRows($('#derived'), [
+    ['総重量（乗員・積載込み）', `${Math.round(veh.m)} kg`],
+    ['前後重量配分', `${pct} : ${100 - pct}`],
+    ['トレッド' + est('trackMm'), `${fmtNum(veh.track, 2)} m`],
+    ['重心高' + est('cgHeightMm'), `${fmtNum(veh.cgHeight, 2)} m`],
+    ['静的安定係数 SSF', fmtNum(veh.ssf, 2)],
+    ['ホイールベース' + est('wheelbaseMm'), `${fmtNum(veh.wheelbase, 2)} m`],
+    ['最小回転半径' + est('minTurnRadiusM'), `${fmtNum(veh.minTurnRadius, 1)} m`],
+    ['前面投影面積' + est('frontalAreaM2'), `${fmtNum(veh.frontalArea, 2)} m²`],
+    ['Cd' + est('cd'), fmtNum(veh.cd, 2)],
+    ['前輪ロール剛性配分' + est('rollStiffFrontPct'), `${Math.round(veh.lltdFront * 100)} %`],
+    ['タイヤ基準 μ（乾燥 / 現在の路面）', `${fmtNum(P.baseMu(veh, 'dry'), 2)} / ${fmtNum(P.baseMu(veh, state.env.surface), 2)}`],
+    ['タイヤ基準荷重（1輪）', `${Math.round(veh.fz0 / P.G)} kg`],
+  ]);
+}
+
+function renderCalc() {
+  const R = state.calcR;
+  const env = state.env;
+  $('#safety-label').textContent = `${Math.round((env.safety || 0) * 100)}%`;
+  const s = P.solveCorner(R, veh, env);
+  $('#res-rec').textContent = fmtKmh(s.vRec);
+  $('#res-lim').textContent = fmtKmh(s.vLimit);
+  const geo = P.lowSpeedGeometry(R, veh);
+  const design = P.roadDesignSpeedKmh(R, env.bankPct);
+  kvRows($('#res-detail'), [
+    ['限界横G', `${fmtNum(s.aLatG, 2)} G`],
+    ['限界を決める要因', P.LIMIT_LABELS[s.limitedBy] || '—'],
+    ['転覆限界速度', `${fmtKmh(s.vRollover)} km/h`],
+    [
+      `道路の設計速度の目安${env.bankPct > 0 ? '' : '（片勾配6%想定）'}`,
+      `約 ${Math.round(design)} km/h`,
+    ],
+    ['必要な前輪舵角（低速時）', Number.isFinite(geo.steerDeg) ? `${fmtNum(geo.steerDeg, 1)}°` : '—'],
+    ['内輪差（低速時）', Number.isFinite(geo.offTracking) ? `${fmtNum(geo.offTracking, 2)} m` : '—'],
+    [
+      '外側前輪の旋回半径',
+      Number.isFinite(geo.outerFrontRadius)
+        ? `${fmtNum(geo.outerFrontRadius, 1)} m${geo.feasible ? '' : '（最小回転半径未満・切り返しが必要）'}`
+        : '曲がれません',
+      geo.feasible ? '' : 'bad',
+    ],
+  ]);
+
+  $('#table-cond').textContent = `${P.SURFACES[env.surface]?.label || ''}・片勾配 ${env.bankPct || 0}%`;
+  const tbody = $('#speed-table');
+  tbody.innerHTML = '';
+  const Rs = [10, 15, 20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 300, 400, 600, 1000];
+  let nearest = Rs[0];
+  for (const r of Rs) if (Math.abs(Math.log(r / R)) < Math.abs(Math.log(nearest / R))) nearest = r;
+  const shortLabel = { front: 'フロント', rear: 'リア', traction: '空転', rollover: '転覆', cap: '—' };
+  for (const r of Rs) {
+    const x = P.solveCorner(r, veh, env);
+    const tr = document.createElement('tr');
+    if (r === nearest) tr.className = 'hl';
+    for (const t of [
+      r,
+      fmtKmh(x.vRec),
+      fmtKmh(x.vLimit),
+      Math.round(P.roadDesignSpeedKmh(r, env.bankPct)),
+      shortLabel[x.limitedBy] || '',
+    ]) {
+      const td = document.createElement('td');
+      td.textContent = t;
+      tr.append(td);
+    }
+    tbody.append(tr);
+  }
+}
+
+// ---------- 走行 ----------
+const motion = new MotionTracker();
+let road = new RoadTracker();
+let mode = 'off'; // 'off' | 'gps' | 'demo'
+let stopGps = null;
+let stopGyro = null;
+let demo = null;
+let wakeLock = null;
+let gpsError = '';
+let lastFixAt = 0;
+
+function onFix(fix) {
+  motion.addFix(fix);
+  lastFixAt = Date.now();
+  gpsError = '';
+  road.update(fix, motion.state);
+  scheduleRender();
+}
+
+function onGpsError(err) {
+  const msg =
+    err?.code === 1
+      ? '許可されていません'
+      : err?.code === 2
+        ? '測位できません'
+        : err?.code === 3
+          ? '受信待ち'
+          : String(err?.message || err);
+  gpsError = msg;
+  scheduleRender();
+}
+
+async function requestWakeLock() {
+  try {
+    wakeLock = await navigator.wakeLock?.request('screen');
+  } catch {
+    wakeLock = null;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && mode !== 'off') requestWakeLock();
+});
+
+function stop() {
+  stopGps?.();
+  stopGyro?.();
+  demo?.stop();
+  stopGps = stopGyro = demo = null;
+  wakeLock?.release?.().catch(() => {});
+  wakeLock = null;
+  mode = 'off';
+  updateControls();
+  scheduleRender();
+}
+
+async function start(kind) {
+  stop();
+  if (state.prefs.sound) ensureAudio();
+  motion.reset();
+  gpsError = '';
+  mode = kind;
+  if (kind === 'demo') {
+    road = new RoadTracker({ fetcher: null });
+    demo = startDemo({
+      onFix,
+      onYaw: (w, t) => motion.setYawRate(w, t),
+      onLoop: () => {
+        motion.reset();
+        road.reset();
+      },
+    });
+    road.setStaticNetwork(demo.ways, demo.origin);
+  } else {
+    road = new RoadTracker(state.prefs.map ? {} : { fetcher: null });
+    // iOS ではクリック処理の中で許可を求める必要がある
+    const motionOk = state.prefs.gyro ? requestMotionPermission() : Promise.resolve(false);
+    stopGps = startGps(onFix, onGpsError);
+    if (await motionOk) stopGyro = startGyro((w, t) => motion.setYawRate(w, t));
+    if (!window.isSecureContext) gpsError = 'https でのみ利用可';
+  }
+  requestWakeLock();
+  updateControls();
+  scheduleRender();
+}
+
+function updateControls() {
+  const startBtn = $('#btn-start');
+  const demoBtn = $('#btn-demo');
+  startBtn.textContent = mode === 'gps' ? '停止' : '計測開始';
+  startBtn.classList.toggle('stop', mode === 'gps');
+  startBtn.classList.toggle('primary', mode !== 'gps');
+  demoBtn.textContent = mode === 'demo' ? 'デモ停止' : 'デモ走行';
+  const pill = $('#hdr-status');
+  pill.textContent = mode === 'gps' ? '計測中' : mode === 'demo' ? 'デモ走行中' : '停止中';
+  pill.className = `pill ${mode === 'gps' ? 'live' : mode === 'demo' ? 'demo' : ''}`;
+}
+
+// ---------- 警告音 ----------
+let audioCtx = null;
+let lastBeep = 0;
+
+function ensureAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch {
+    audioCtx = null;
+  }
+}
+
+function beep(freq, count) {
+  if (!audioCtx) return;
+  const t0 = audioCtx.currentTime;
+  for (let i = 0; i < count; i++) {
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.frequency.value = freq;
+    o.type = 'square';
+    const t = t0 + i * 0.18;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    o.connect(g).connect(audioCtx.destination);
+    o.start(t);
+    o.stop(t + 0.14);
+  }
+}
+
+function soundFor(alert) {
+  if (!state.prefs.sound || !alert || mode === 'off') return;
+  const now = Date.now();
+  if (alert.level === 'danger' && now - lastBeep > 1500) {
+    beep(1320, 3);
+    lastBeep = now;
+  } else if (alert.level === 'brake' && now - lastBeep > 3000) {
+    beep(880, 2);
+    lastBeep = now;
+  }
+}
+
+// ---------- 判定 ----------
+function nextCurve(rr) {
+  if (!rr) return null;
+  return rr.curves.find((c) => c.distApex > 0) || null;
+}
+
+function computeAlert(v, nowSpeeds, rr) {
+  if (mode === 'off' || v < 3) return null;
+  let alert = null;
+  const raise = (level, text) => {
+    const rank = { caution: 1, brake: 2, danger: 3 };
+    if (!alert || rank[level] > rank[alert.level]) alert = { level, text };
+  };
+  if (v > nowSpeeds.vLimit) raise('danger', '限界速度を超えています');
+  if (rr) {
+    const { kappa, ds, idx0 } = rr.profile;
+    let worst = null;
+    for (let j = idx0 + 1; j < kappa.length; j++) {
+      const d = (j - idx0) * ds;
+      if (d < 20) continue; // 目の前は「現在のカーブ」で判定する
+      const k = Math.abs(kappa[j]);
+      if (k < 1 / 3000) continue;
+      const s = table.lookup(1 / k);
+      const aRec = (v * v - s.vRec * s.vRec) / (2 * d);
+      const aLim = (v * v - s.vLimit * s.vLimit) / (2 * d);
+      if (!worst || aRec > worst.aRec) worst = { aRec, aLim, d, vRec: s.vRec, R: 1 / k };
+    }
+    if (worst && worst.aRec > 0) {
+      if (worst.aLim > 0.55 * P.G) {
+        raise('danger', `急減速！ ${Math.round(worst.d)} m 先 ${fmtR(worst.R)}`);
+      } else if (worst.aRec > 0.3 * P.G) {
+        raise(
+          'brake',
+          `減速：${Math.round(worst.d)} m で ${fmtKmh(worst.vRec)} km/h へ（${(worst.aRec / P.G).toFixed(2)} G）`,
+        );
+      }
+    }
+  }
+  if (v > nowSpeeds.vRec) raise('caution', '現在のカーブの安全上限を超えています');
+  return alert;
+}
+
+// ---------- 矢印 ----------
+function arrowSvg(dir, R) {
+  const head = (x, y, dx, dy) => {
+    const n = Math.hypot(dx, dy);
+    const ux = dx / n;
+    const uy = dy / n;
+    const bx = x - ux * 9;
+    const by = y - uy * 9;
+    return `M${bx - uy * 7} ${by + ux * 7} L${x} ${y} L${bx + uy * 7} ${by - ux * 7}`;
+  };
+  let d;
+  if (!dir || !Number.isFinite(R) || R >= 1500) {
+    d = `M24 42 V8 ${head(24, 8, 0, -1)}`;
+  } else if (R < 40) {
+    d = `M14 42 V22 A10 10 0 0 1 34 22 V32 ${head(34, 32, 0, 1)}`;
+  } else if (R < 120) {
+    d = `M16 42 C16 20 22 14 40 14 ${head(40, 14, 1, 0)}`;
+  } else {
+    d = `M20 42 Q20 14 36 8 ${head(36, 8, 16, -6)}`;
+  }
+  const flip = dir === 'left' ? ' transform="translate(48 0) scale(-1 1)"' : '';
+  return `<path d="${d}"${flip} fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>`;
+}
+
+// ---------- 前方プレビュー ----------
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function drawPreview(rr, ms) {
+  const cv = $('#preview');
+  const w = cv.clientWidth;
+  const h = cv.clientHeight;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+  }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2;
+  const cy = h * 0.86;
+  const range = Math.max(150, Math.min(400, ms.speed * 10));
+  const scale = (cy - 14) / range;
+  const muted = cssVar('--muted');
+  const line = cssVar('--line');
+
+  // 距離の目盛り
+  ctx.strokeStyle = line;
+  ctx.fillStyle = muted;
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.lineWidth = 1;
+  for (let d = 100; d < range; d += 100) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, d * scale, Math.PI * 1.08, Math.PI * 1.92);
+    ctx.stroke();
+    ctx.fillText(`${d}m`, cx + 4, cy - d * scale - 3);
+  }
+
+  const v = ms.speed;
+  const colorFor = (k) => {
+    if (Math.abs(k) < 1 / 600) return '#3b4a5c';
+    const s = table.lookup(1 / Math.abs(k));
+    if (v > s.vLimit) return cssVar('--danger');
+    if (v > s.vRec) return cssVar('--warn');
+    return cssVar('--accent');
+  };
+
+  if (rr) {
+    const { pts, kappa, idx0 } = rr.profile;
+    const o = pts[idx0];
+    const a = pts[Math.max(0, idx0 - 1)];
+    const b = pts[Math.min(pts.length - 1, idx0 + 2)];
+    const hd = Math.atan2(b.x - a.x, b.y - a.y);
+    const c = Math.cos(hd);
+    const s = Math.sin(hd);
+    const tx = (p) => {
+      const dx = p.x - o.x;
+      const dy = p.y - o.y;
+      return [cx + (dx * c - dy * s) * scale, cy - (dx * s + dy * c) * scale];
+    };
+    ctx.lineCap = 'round';
+    ctx.lineWidth = 7;
+    for (let i = 1; i < pts.length; i++) {
+      ctx.strokeStyle = i <= idx0 ? '#2a3542' : colorFor(kappa[i]);
+      ctx.beginPath();
+      ctx.moveTo(...tx(pts[i - 1]));
+      ctx.lineTo(...tx(pts[i]));
+      ctx.stroke();
+    }
+    ctx.font = 'bold 13px system-ui, sans-serif';
+    for (const cv2 of rr.curves) {
+      if (cv2.distApex < 0) continue;
+      const [x, y] = tx(pts[cv2.apexIdx]);
+      if (y < 0 || x < 0 || x > w) continue;
+      const label = `R${Math.round(cv2.R)}`;
+      const off = cv2.dir === 'left' ? -12 - ctx.measureText(label).width : 12;
+      ctx.fillStyle = cssVar('--text');
+      ctx.fillText(label, x + off, y + 4);
+    }
+  } else if (mode !== 'off' && ms.speed > 1.5) {
+    // 地図が無いときは、いまの曲率のまま進んだ場合の軌跡を点線で
+    const k = motion.kappa;
+    ctx.setLineDash([8, 8]);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = colorFor(k);
+    ctx.beginPath();
+    for (let sPos = 0; sPos <= range; sPos += 5) {
+      const x = Math.abs(k) < 1e-6 ? 0 : -(1 - Math.cos(k * sPos)) / k;
+      const y = Math.abs(k) < 1e-6 ? sPos : Math.sin(k * sPos) / k;
+      const X = cx + x * scale;
+      const Y = cy - y * scale;
+      if (sPos === 0) ctx.moveTo(X, Y);
+      else ctx.lineTo(X, Y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  } else {
+    ctx.fillStyle = muted;
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('計測を開始すると前方の道路形状を表示します', cx, h / 2);
+    ctx.textAlign = 'start';
+  }
+
+  // 自車
+  ctx.fillStyle = cssVar('--text');
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 12);
+  ctx.lineTo(cx - 8, cy + 8);
+  ctx.lineTo(cx + 8, cy + 8);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ---------- 走行画面の描画 ----------
+function renderDrive() {
+  const ms = motion.state;
+  const running = mode !== 'off';
+  const hasFix = !!motion.lastFix;
+  const v = ms.speed;
+  $('#cur-speed').textContent = hasFix ? Math.round(v * 3.6) : '--';
+  $('#cur-latg').textContent = hasFix ? `${ms.lateralG.toFixed(2)} G` : '--';
+
+  const rr = road.result;
+  const roadName = rr ? [rr.road.ref, rr.road.name].filter(Boolean).join(' ') : '';
+  $('#cur-road').textContent = roadName;
+
+  // 現在のカーブ（計測値）
+  const Rnow = hasFix ? ms.radius : NaN;
+  const nowS = Number.isFinite(Rnow) ? table.lookup(Rnow) : { vLimit: Infinity, vRec: Infinity };
+  $('#now-r').textContent = hasFix ? fmtR(Rnow) : '--';
+  $('#now-map-r').textContent = rr ? fmtR(rr.radiusHere) : '--';
+  $('#now-rec').textContent = hasFix ? fmtKmh(nowS.vRec) : '--';
+  $('#now-lim').textContent = hasFix ? fmtKmh(nowS.vLimit) : '--';
+  $('#now-src').textContent = SOURCE_LABEL[ms.source] || '計測';
+  $('#now-arrow').innerHTML = arrowSvg(Number.isFinite(Rnow) ? ms.turnDir : null, Rnow);
+  $('#card-now').classList.toggle('over', hasFix && v > nowS.vRec);
+
+  // この先のカーブ（地図）
+  const nc = nextCurve(rr);
+  if (nc) {
+    const s = table.lookup(nc.R);
+    $('#next-dist').textContent = nc.distStart > 0 ? `${Math.round(nc.distStart)} m 先` : 'カーブ中';
+    $('#next-r').textContent = fmtR(nc.R);
+    $('#next-rec').textContent = fmtKmh(s.vRec);
+    $('#next-lim').textContent = fmtKmh(s.vLimit);
+    $('#next-arrow').innerHTML = arrowSvg(nc.dir, nc.R);
+    $('#card-next').classList.toggle('over', v > s.vRec);
+  } else {
+    const why = !running
+      ? '--'
+      : rr
+        ? '直線が続きます'
+        : road.status === 'loading'
+          ? '地図を読込中'
+          : !state.prefs.map && mode === 'gps'
+            ? '地図オフ'
+            : '道路未特定';
+    $('#next-dist').textContent = why;
+    $('#next-r').textContent = '--';
+    $('#next-rec').textContent = '--';
+    $('#next-lim').textContent = '--';
+    $('#next-arrow').innerHTML = arrowSvg(null, Infinity);
+    $('#card-next').classList.remove('over');
+  }
+
+  // 警告
+  const alert = hasFix ? computeAlert(v, nowS, rr) : null;
+  const box = $('#alert');
+  if (alert) {
+    box.hidden = false;
+    box.className = `alert ${alert.level}`;
+    box.textContent = alert.text;
+  } else {
+    box.hidden = true;
+  }
+  soundFor(alert);
+
+  // ステータス
+  const stale = running && lastFixAt && Date.now() - lastFixAt > 5000;
+  $('#st-gps').textContent = gpsError
+    ? gpsError
+    : !running
+      ? '--'
+      : !hasFix || stale
+        ? '受信待ち'
+        : ms.accuracy != null
+          ? `±${Math.round(ms.accuracy)} m`
+          : 'OK';
+  const mapState =
+    mode === 'gps' && !state.prefs.map
+      ? 'オフ'
+      : !running
+        ? '--'
+        : `${MAP_STATUS[road.status] || road.status}${road.loading && road.net ? '（更新中）' : ''}`;
+  $('#st-map').textContent = mapState;
+  $('#st-src').textContent = SOURCE_LABEL[ms.source] || '--';
+
+  if ($('#view-drive').classList.contains('active')) drawPreview(rr, ms);
+}
+
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    renderDrive();
+  });
+}
+
+// ---------- タブ ----------
+function bindTabs() {
+  for (const b of $$('.tabbar button')) {
+    b.addEventListener('click', () => {
+      for (const x of $$('.tabbar button')) x.classList.toggle('active', x === b);
+      for (const v of $$('.view')) v.classList.toggle('active', v.id === `view-${b.dataset.view}`);
+      window.scrollTo(0, 0);
+      scheduleRender();
+    });
+  }
+}
+
+// ---------- 起動 ----------
+function init() {
+  load();
+  bindForms();
+  bindTabs();
+  $('#btn-start').addEventListener('click', () => (mode === 'gps' ? stop() : start('gps')));
+  $('#btn-demo').addEventListener('click', () => (mode === 'demo' ? stop() : start('demo')));
+  window.addEventListener('resize', scheduleRender);
+  setInterval(() => mode !== 'off' && scheduleRender(), 1000);
+  recompute();
+  updateControls();
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+}
+
+init();

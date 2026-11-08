@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0f14" />
+    <meta name="description" content="道路の半径 R から、車重・タイヤ・駆動方式・前後軸重・外寸を考慮してコーナリングの上限速度を求めます" />
+    <title>Cornering</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+    <link rel="stylesheet" href="css/style.css" />
+    <script type="module" src="js/app.js"></script>
+  </head>
+  <body>
+    <header class="appbar">
+      <h1>Cornering</h1>
+      <span id="hdr-status" class="pill">停止中</span>
+    </header>
+
+    <main>
+      <!-- ===== 走行 ===== -->
+      <section id="view-drive" class="view active" aria-label="走行">
+        <div class="controls">
+          <button id="btn-start" class="btn primary">計測開始</button>
+          <button id="btn-demo" class="btn">デモ走行</button>
+        </div>
+
+        <div class="speed-block">
+          <div class="speed"><span id="cur-speed">--</span><small>km/h</small></div>
+          <div class="speed-sub">
+            <span>横G <b id="cur-latg">--</b></span>
+            <span id="cur-road" class="road-name"></span>
+          </div>
+        </div>
+
+        <div id="alert" class="alert" hidden></div>
+
+        <article class="card" id="card-next">
+          <header><h2>この先のカーブ</h2><span class="tag">地図</span></header>
+          <div class="curve">
+            <svg class="arrow" id="next-arrow" viewBox="0 0 48 48" aria-hidden="true"></svg>
+            <div class="curve-main">
+              <div class="curve-dist" id="next-dist">--</div>
+              <div class="curve-r">R <b id="next-r">--</b></div>
+            </div>
+            <div class="curve-speeds">
+              <div><span>安全上限</span><b id="next-rec">--</b></div>
+              <div><span>理論限界</span><b id="next-lim">--</b></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card" id="card-now">
+          <header><h2>現在のカーブ</h2><span class="tag" id="now-src">計測</span></header>
+          <div class="curve">
+            <svg class="arrow" id="now-arrow" viewBox="0 0 48 48" aria-hidden="true"></svg>
+            <div class="curve-main">
+              <div class="curve-r">R <b id="now-r">--</b></div>
+              <div class="curve-sub">地図 R <span id="now-map-r">--</span></div>
+            </div>
+            <div class="curve-speeds">
+              <div><span>安全上限</span><b id="now-rec">--</b></div>
+              <div><span>理論限界</span><b id="now-lim">--</b></div>
+            </div>
+          </div>
+        </article>
+
+        <canvas id="preview" class="preview" aria-label="この先の道路形状"></canvas>
+
+        <div class="chips" id="surface-chips" role="radiogroup" aria-label="路面状態"></div>
+
+        <footer class="status-bar">
+          <span>GPS <b id="st-gps">--</b></span>
+          <span>地図 <b id="st-map">--</b></span>
+          <span>R推定 <b id="st-src">--</b></span>
+        </footer>
+        <p class="attribution">道路データ © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></p>
+      </section>
+
+      <!-- ===== 計算 ===== -->
+      <section id="view-calc" class="view" aria-label="計算">
+        <article class="card">
+          <header><h2>道路の条件</h2></header>
+          <div class="form-grid">
+            <label class="field wide">
+              <span>カーブ半径 R</span>
+              <div class="with-unit"><input id="calc-r" type="number" inputmode="decimal" min="1" step="1" value="50" /><em>m</em></div>
+            </label>
+            <div class="quick wide" id="calc-quick"></div>
+            <label class="field">
+              <span>路面</span>
+              <select data-env="surface"></select>
+            </label>
+            <label class="field">
+              <span>片勾配（カント）</span>
+              <div class="with-unit"><input data-env="bankPct" type="number" inputmode="decimal" step="0.5" min="-10" max="15" /><em>%</em></div>
+            </label>
+            <label class="field wide">
+              <span>安全係数（限界横Gに対する割合） <b id="safety-label"></b></span>
+              <input data-env="safety" type="range" min="0.3" max="0.9" step="0.05" />
+            </label>
+          </div>
+        </article>
+
+        <article class="card result">
+          <header><h2>結果</h2></header>
+          <div class="result-main">
+            <div><span>安全上限速度</span><b id="res-rec">--</b><small>km/h</small></div>
+            <div><span>理論限界速度</span><b id="res-lim">--</b><small>km/h</small></div>
+          </div>
+          <dl class="kv" id="res-detail"></dl>
+        </article>
+
+        <article class="card">
+          <header><h2>半径別の速度表</h2><span class="tag" id="table-cond"></span></header>
+          <table class="speed-table">
+            <thead><tr><th>R [m]</th><th>安全上限</th><th>理論限界</th><th>設計速度</th><th>支配要因</th></tr></thead>
+            <tbody id="speed-table"></tbody>
+          </table>
+        </article>
+      </section>
+
+      <!-- ===== 車両 ===== -->
+      <section id="view-vehicle" class="view" aria-label="車両">
+        <article class="card">
+          <header><h2>重量</h2></header>
+          <div class="form-grid">
+            <label class="field">
+              <span>車両重量</span>
+              <div class="with-unit"><input data-veh="massKg" type="number" inputmode="numeric" min="300" step="10" /><em>kg</em></div>
+            </label>
+            <label class="field">
+              <span>乗員・積載</span>
+              <div class="with-unit"><input data-veh="payloadKg" type="number" inputmode="numeric" min="0" step="10" /><em>kg</em></div>
+            </label>
+            <label class="field">
+              <span>前軸重</span>
+              <div class="with-unit"><input data-veh="frontAxleKg" type="number" inputmode="numeric" min="0" step="10" /><em>kg</em></div>
+            </label>
+            <label class="field">
+              <span>後軸重</span>
+              <div class="with-unit"><input data-veh="rearAxleKg" type="number" inputmode="numeric" min="0" step="10" /><em>kg</em></div>
+            </label>
+            <p class="hint wide" id="axle-hint"></p>
+            <button class="btn small wide" id="btn-axle-estimate" type="button">前後軸重が分からない → 駆動方式から推定</button>
+          </div>
+        </article>
+
+        <article class="card">
+          <header><h2>外寸</h2></header>
+          <div class="form-grid three">
+            <label class="field">
+              <span>全幅</span>
+              <div class="with-unit"><input data-veh="widthMm" type="number" inputmode="numeric" min="1000" step="5" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>全高</span>
+              <div class="with-unit"><input data-veh="heightMm" type="number" inputmode="numeric" min="900" step="5" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>全長</span>
+              <div class="with-unit"><input data-veh="lengthMm" type="number" inputmode="numeric" min="2000" step="5" /><em>mm</em></div>
+            </label>
+          </div>
+          <p class="hint">車検証の「長さ・幅・高さ」の値（cm 表記なら ×10）でOK</p>
+        </article>
+
+        <article class="card">
+          <header><h2>駆動系・タイヤ</h2></header>
+          <div class="form-grid">
+            <label class="field wide">
+              <span>駆動方式</span>
+              <select data-veh="drivetrain"></select>
+            </label>
+            <label class="field wide check">
+              <input data-veh="lsd" type="checkbox" />
+              <span>LSD（機械式・ヘリカル等の差動制限）あり</span>
+            </label>
+            <label class="field wide">
+              <span>タイヤの種類</span>
+              <select data-veh="tire"></select>
+            </label>
+            <label class="field">
+              <span>タイヤ幅</span>
+              <div class="with-unit"><input data-veh="tireWidthMm" type="number" inputmode="numeric" min="125" max="355" step="5" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>摩耗状態</span>
+              <select data-veh="wear"></select>
+            </label>
+          </div>
+        </article>
+
+        <details class="card">
+          <summary><h2>詳細設定（推定値の上書き）</h2></summary>
+          <p class="hint">空欄なら外寸・重量から自動で推定します。実測値やカタログ値が分かるなら入れると精度が上がります</p>
+          <div class="form-grid">
+            <label class="field">
+              <span>トレッド（左右平均）</span>
+              <div class="with-unit"><input data-veh="trackMm" type="number" inputmode="numeric" step="5" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>重心高</span>
+              <div class="with-unit"><input data-veh="cgHeightMm" type="number" inputmode="numeric" step="5" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>ホイールベース</span>
+              <div class="with-unit"><input data-veh="wheelbaseMm" type="number" inputmode="numeric" step="5" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>最小回転半径</span>
+              <div class="with-unit"><input data-veh="minTurnRadiusM" type="number" inputmode="decimal" step="0.1" /><em>m</em></div>
+            </label>
+            <label class="field">
+              <span>空気抵抗係数 Cd</span>
+              <input data-veh="cd" type="number" inputmode="decimal" step="0.01" />
+            </label>
+            <label class="field">
+              <span>前面投影面積</span>
+              <div class="with-unit"><input data-veh="frontalAreaM2" type="number" inputmode="decimal" step="0.05" /><em>m²</em></div>
+            </label>
+            <label class="field wide">
+              <span>前輪側ロール剛性配分</span>
+              <div class="with-unit"><input data-veh="rollStiffFrontPct" type="number" inputmode="numeric" min="20" max="85" step="1" /><em>%</em></div>
+            </label>
+          </div>
+        </details>
+
+        <article class="card">
+          <header><h2>計算に使う値</h2></header>
+          <dl class="kv" id="derived"></dl>
+        </article>
+
+        <article class="card">
+          <header><h2>走行時の設定</h2></header>
+          <div class="form-grid">
+            <label class="field wide check">
+              <input data-pref="sound" type="checkbox" />
+              <span>速度超過・減速が必要なときに警告音を鳴らす</span>
+            </label>
+            <label class="field wide check">
+              <input data-pref="gyro" type="checkbox" />
+              <span>ジャイロセンサーで旋回半径を測る（端末を固定して使用）</span>
+            </label>
+            <label class="field wide check">
+              <input data-pref="map" type="checkbox" />
+              <span>地図データ（OpenStreetMap）で前方のカーブを先読みする</span>
+            </label>
+          </div>
+        </article>
+      </section>
+
+      <!-- ===== 説明 ===== -->
+      <section id="view-info" class="view" aria-label="説明">
+        <article class="card prose">
+          <header><h2>使い方</h2></header>
+          <ol>
+            <li>「車両」タブで重量・前後軸重・全幅・全高・全長・駆動方式・タイヤを入力（車種や年式は不要）</li>
+            <li>「走行」タブで「計測開始」。スマホはホルダーに固定し、<strong>運転中は操作しない</strong>でください</li>
+            <li>路面が濡れてきたら、停車中か同乗者が路面状態を切り替えてください</li>
+          </ol>
+          <p>机上で試すなら「デモ走行」で架空の峠道を走らせられます。「計算」タブでは任意の R に対する上限速度と半径別の速度表を確認できます</p>
+        </article>
+
+        <article class="card prose">
+          <header><h2>R（カーブ半径）の求め方</h2></header>
+          <ul>
+            <li><b>この先のカーブ（地図）</b>：OpenStreetMap の道路形状に現在地を当てはめ、道なりに先読みして曲率を計算します。交差点では最も直進に近い道を選びます</li>
+            <li><b>現在のカーブ（計測）</b>：ジャイロのヨーレート ω から R = v / ω、ジャイロが無ければ GPS の進行方位の変化率、さらに無ければ GPS 軌跡への円の当てはめで求めます</li>
+          </ul>
+        </article>
+
+        <article class="card prose">
+          <header><h2>計算モデル</h2></header>
+          <p>定常円旋回で、各軸が自分の軸重ぶんの横力を受け持てる最大の速度を求めています</p>
+          <ul>
+            <li><b>タイヤ</b>：種類 × 路面 × 摩耗でピーク μ を決め、荷重感度（重いほど μ が下がる）を考慮。タイヤ幅が太いほど基準荷重が大きくなり、荷重感度の影響が緩みます</li>
+            <li><b>車重・前後軸重</b>：前後それぞれの軸の荷重と必要横力を計算。乗員・積載は前後均等に加算</li>
+            <li><b>全幅・全高</b>：トレッド（全幅×0.86）と重心高（0.42×全高−0.06m）を推定し、横方向の荷重移動と転覆限界（SSF）を計算。前面投影面積と Cd も推定して空気抵抗に使います</li>
+            <li><b>全長</b>：ホイールベースを推定し、低速時の舵角・内輪差・最小回転半径の判定に使います</li>
+            <li><b>駆動方式</b>：速度を保つための駆動力（空気抵抗＋転がり抵抗＋コーナリング抵抗）が駆動輪の摩擦円を消費します。オープンデフでは荷重の抜けた内輪が空転すると速度を維持できません</li>
+            <li><b>片勾配</b>：路面の傾きによる法線力・横力の変化を考慮</li>
+          </ul>
+          <p>「安全上限」は理論限界の横G に安全係数を掛けた速度、「設計速度」は道路構造令の R = V² / 127(i + f) から逆算した、その道路が想定している速度の目安です</p>
+        </article>
+
+        <article class="card prose warn">
+          <header><h2>注意</h2></header>
+          <ul>
+            <li>表示される限界速度は<b>理想的な定常旋回の理論値</b>です。実際には路面の凹凸・ギャップ、横風、ブレーキング中の旋回、サスペンションの状態、ドライバーの操作で大きく下がります</li>
+            <li>地図の形状は実際の道路と数m〜十数mずれることがあり、R の誤差になります。見通しの悪いカーブ・対向車・歩行者には一切対応していません</li>
+            <li>法定速度・指定速度が常に優先です。限界付近の速度で公道を走らないでください</li>
+            <li>運転中にスマートフォンを注視・操作することは法律で禁止されています</li>
+          </ul>
+        </article>
+      </section>
+    </main>
+
+    <nav class="tabbar" aria-label="画面切り替え">
+      <button data-view="drive" class="active">走行</button>
+      <button data-view="calc">計算</button>
+      <button data-view="vehicle">車両</button>
+      <button data-view="info">説明</button>
+    </nav>
+  </body>
+</html>
