@@ -184,7 +184,11 @@ function renderPresetHint() {
   };
   const pct = Math.round(pr.specs.frontRatio * 100);
   add(presetName(pr), 'b');
-  add(`：純正タイヤ ${pr.tires}・前後配分 ${pct}:${100 - pct}${pr.specs.ratioEstimated ? '（推定）' : ''}`);
+  const s = pr.specs;
+  const axle = s.axleFromInspection
+    ? `前後軸重 ${s.frontAxleKg}/${s.massKg - s.frontAxleKg}kg（車検証の値）`
+    : `前後配分 ${pct}:${100 - pct}${s.ratioEstimated ? '（推定）' : ''}`;
+  add(`：純正タイヤ ${pr.tires}・${axle}`);
   // 「前 / 後」の区切りは前後に空白あり（215/40R18 の扁平率のスラッシュと区別）
   if (pr.tires.includes(' / ')) add('（前後異径のためタイヤ幅は平均値）');
   if (state.presetEdited) add('・一部変更あり', 'span', 'edited');

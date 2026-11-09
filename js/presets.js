@@ -21,6 +21,8 @@
  * @property {number} [trackMm]
  * @property {number} [minTurnRadiusM] カタログの最小回転半径
  * @property {boolean} [ratioEstimated] 前後配分が公称値ではなく推定値
+ * @property {number} [frontAxleKg] 前軸重が分かっていればその値（後軸重 = 車両重量 − 前軸重）
+ * @property {boolean} [axleFromInspection] 前後軸重が実車の車検証の値
  */
 
 const p = (id, maker, model, grade, tires, specs) => ({ id, maker, model, grade, tires, specs });
@@ -83,7 +85,9 @@ export const PRESET_GROUPS = [
     label: '国産車（旧型・名車）',
     items: [
       p('accord-tourer-cw2', 'ホンダ', 'アコードツアラー', 'タイプS 5AT（CW2・2012）', '235/45R18', {
-        massKg: 1610, frontRatio: 0.61, ratioEstimated: true, widthMm: 1850, heightMm: 1470, lengthMm: 4750,
+        // 前後軸重は実車の車検証の値（前前軸重 910kg・後後軸重 700kg）
+        massKg: 1610, frontAxleKg: 910, frontRatio: 910 / 1610, axleFromInspection: true,
+        widthMm: 1850, heightMm: 1470, lengthMm: 4750,
         drivetrain: 'FF', lsd: false, tire: 'standard', tireWidthMm: 235, wheelbaseMm: 2705, trackMm: 1580,
         minTurnRadiusM: 5.7,
       }),
@@ -181,7 +185,7 @@ export function presetName(preset) {
  */
 export function presetToVehicle(preset) {
   const s = preset.specs;
-  const front = Math.round(s.massKg * s.frontRatio);
+  const front = s.frontAxleKg ?? Math.round(s.massKg * s.frontRatio);
   return {
     massKg: s.massKg,
     frontAxleKg: front,
