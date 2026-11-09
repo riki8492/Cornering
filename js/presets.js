@@ -19,6 +19,8 @@
  * @property {number} tireWidthMm
  * @property {number} [wheelbaseMm]
  * @property {number} [trackMm]
+ * @property {number} [minTurnRadiusM] カタログの最小回転半径
+ * @property {boolean} [ratioEstimated] 前後配分が公称値ではなく推定値
  */
 
 const p = (id, maker, model, grade, tires, specs) => ({ id, maker, model, grade, tires, specs });
@@ -78,8 +80,18 @@ export const PRESET_GROUPS = [
     ],
   },
   {
-    label: '国産車（名車・旧車）',
+    label: '国産車（旧型・名車）',
     items: [
+      p('accord-tourer-cw2', 'ホンダ', 'アコードツアラー', 'タイプS 5AT（CW2・2012）', '235/45R18', {
+        massKg: 1610, frontRatio: 0.61, ratioEstimated: true, widthMm: 1850, heightMm: 1470, lengthMm: 4750,
+        drivetrain: 'FF', lsd: false, tire: 'standard', tireWidthMm: 235, wheelbaseMm: 2705, trackMm: 1580,
+        minTurnRadiusM: 5.7,
+      }),
+      p('legacy-br9-25gt', 'スバル', 'レガシィツーリングワゴン', '2.5GT 5AT（BR9・2009）', '225/50R17', {
+        massKg: 1510, frontRatio: 0.59, ratioEstimated: true, widthMm: 1780, heightMm: 1535, lengthMm: 4775,
+        drivetrain: 'AWD', lsd: false, tire: 'standard', tireWidthMm: 225, wheelbaseMm: 2750,
+        minTurnRadiusM: 5.5,
+      }),
       p('wrx-sti-vab', 'スバル', 'WRX STI', 'Type S（VAB）', '245/35R19', {
         massKg: 1490, frontRatio: 0.59, widthMm: 1795, heightMm: 1475, lengthMm: 4595,
         drivetrain: 'AWD_R', lsd: true, tire: 'sport', tireWidthMm: 245, wheelbaseMm: 2650,
@@ -187,6 +199,6 @@ export function presetToVehicle(preset) {
     cd: null,
     frontalAreaM2: null,
     rollStiffFrontPct: null,
-    minTurnRadiusM: null,
+    minTurnRadiusM: s.minTurnRadiusM ?? null,
   };
 }

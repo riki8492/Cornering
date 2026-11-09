@@ -54,3 +54,12 @@ test('presetToVehicle：軸重の合計が車両重量になり、前の車の�
   assert.equal(v.wheelbaseMm, 2735);
   assert.equal(findPreset('no-such-car'), null);
 });
+
+test('カタログの最小回転半径があるプリセットはその値を入れる', () => {
+  const accord = presetToVehicle(findPreset('accord-tourer-cw2'));
+  const legacy = presetToVehicle(findPreset('legacy-br9-25gt'));
+  assert.equal(accord.minTurnRadiusM, 5.7);
+  assert.equal(legacy.minTurnRadiusM, 5.5);
+  assert.equal(deriveVehicle(legacy).minTurnRadius, 5.5);
+  assert.equal(deriveVehicle(legacy).drivetrain, 'AWD');
+});
