@@ -185,6 +185,15 @@ details.card > summary::-webkit-details-marker {
   margin: 6px 0 0;
 }
 
+.hint b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.hint .edited {
+  color: var(--caution);
+}
+
 /* ---------- 走行画面 ---------- */
 .controls {
   display: grid;

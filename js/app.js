@@ -6,6 +6,7 @@ import { RoadTracker } from './roadmap.js';
 import { DemElevation, gradeBetween } from './elevation.js';
 import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
+import { PRESET_GROUPS, findPreset, presetName, presetToVehicle } from './presets.js';
 
 const STORE_KEY = 'cornering.v1';
 const $ = (sel) => document.querySelector(sel);
@@ -18,6 +19,8 @@ const state = {
   calcR: 50,
   calc: { entryElev: null, exitElev: null, angleDeg: 90 },
   axleAuto: 'rearAxleKg', // 自動補完した側の軸重（手入力された値は上書きしない）
+  presetId: null, // 選んだ車種プリセット
+  presetEdited: false, // プリセットを選んだあとに手で変えたか
 };
 
 function load() {
@@ -30,6 +33,10 @@ function load() {
     if (Number(s.calcR) > 0) state.calcR = Number(s.calcR);
     if (s.calc) Object.assign(state.calc, s.calc);
     if ('axleAuto' in s) state.axleAuto = s.axleAuto;
+    if (findPreset(s.presetId)) {
+      state.presetId = s.presetId;
+      state.presetEdited = !!s.presetEdited;
+    }
   } catch {
     /* 保存領域が使えなくても既定値で動く */
   }
@@ -152,10 +159,79 @@ function estimateAxles() {
   v.frontAxleKg = Math.round((m * ratio) / 10) * 10;
   v.rearAxleKg = m - v.frontAxleKg;
   state.axleAuto = 'rearAxleKg';
+  markPresetEdited();
   writeInput(vehInput('frontAxleKg'), v.frontAxleKg);
   writeInput(vehInput('rearAxleKg'), v.rearAxleKg);
   save();
   recompute();
+}
+
+// ---------- 車種プリセット ----------
+function renderPresetHint() {
+  const el = $('#preset-hint');
+  const pr = findPreset(state.presetId);
+  el.textContent = '';
+  if (!pr) {
+    el.textContent =
+      '選ぶと下の項目に代表値が入ります（あとから自由に変更できます）。年式・グレード・オプションで変わるので、正確な値は車検証で確認してください';
+    return;
+  }
+  const add = (text, tag = 'span', cls = '') => {
+    const n = document.createElement(tag);
+    n.textContent = text;
+    if (cls) n.className = cls;
+    el.append(n);
+  };
+  const pct = Math.round(pr.specs.frontRatio * 100);
+  add(presetName(pr), 'b');
+  add(`：純正タイヤ ${pr.tires}・前後配分 ${pct}:${100 - pct}`);
+  // 「前 / 後」の区切りは前後に空白あり（215/40R18 の扁平率のスラッシュと区別）
+  if (pr.tires.includes(' / ')) add('（前後異径のためタイヤ幅は平均値）');
+  if (state.presetEdited) add('・一部変更あり', 'span', 'edited');
+}
+
+/** プリセットを選んだあとに手で値を変えたら印を付ける */
+function markPresetEdited() {
+  if (state.presetId && !state.presetEdited) {
+    state.presetEdited = true;
+    renderPresetHint();
+  }
+}
+
+function applyPreset(id) {
+  const pr = findPreset(id);
+  state.presetId = pr ? pr.id : null;
+  state.presetEdited = false;
+  if (pr) {
+    Object.assign(state.vehicle, presetToVehicle(pr));
+    state.axleAuto = 'rearAxleKg';
+    for (const el of $$('[data-veh]')) writeInput(el, state.vehicle[el.dataset.veh]);
+  }
+  save();
+  recompute();
+  renderPresetHint();
+}
+
+function bindPresets() {
+  const sel = $('#preset-select');
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '選択しない（手入力）';
+  sel.append(none);
+  for (const g of PRESET_GROUPS) {
+    const og = document.createElement('optgroup');
+    og.label = g.label;
+    for (const pr of g.items) {
+      const o = document.createElement('option');
+      o.value = pr.id;
+      o.textContent = `${pr.maker} ${pr.model}　${pr.grade}`;
+      og.append(o);
+    }
+    sel.append(og);
+  }
+  sel.value = state.presetId || '';
+  sel.addEventListener('change', () => applyPreset(sel.value));
+  renderPresetHint();
 }
 
 function bindForms() {
@@ -170,6 +246,7 @@ function bindForms() {
     el.addEventListener(el.type === 'checkbox' || el.tagName === 'SELECT' ? 'change' : 'input', () => {
       state.vehicle[key] = readInput(el);
       syncAxles(key);
+      markPresetEdited();
       save();
       recompute();
     });
@@ -860,6 +937,7 @@ function bindTabs() {
 function init() {
   load();
   bindForms();
+  bindPresets();
   bindTabs();
   $('#btn-start').addEventListener('click', () => (mode === 'gps' ? stop() : start('gps')));
   $('#btn-demo').addEventListener('click', () => (mode === 'demo' ? stop() : start('demo')));
