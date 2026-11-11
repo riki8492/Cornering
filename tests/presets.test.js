@@ -1,22 +1,57 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ALL_PRESETS, PRESET_GROUPS, findPreset, presetToVehicle } from '../js/presets.js';
+import {
+  ALL_PRESETS,
+  BODY_TYPES,
+  MAKERS,
+  filterPresets,
+  groupByMaker,
+  findPreset,
+  presetToVehicle,
+} from '../js/presets.js';
 import { deriveVehicle, solveCorner, DRIVETRAINS, TIRES, DEFAULT_ENV } from '../js/physics.js';
 
 const dry = { ...DEFAULT_ENV, surface: 'dry' };
 
-test('プリセット：ID が重複せず、国産・輸入の各グループに車種がある', () => {
+test('プリセット：ID が重複せず、メーカーとボディタイプが正しく付いている', () => {
   const ids = ALL_PRESETS.map((p) => p.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.ok(PRESET_GROUPS.length >= 3);
-  for (const g of PRESET_GROUPS) assert.ok(g.items.length > 0, g.label);
+  for (const p of ALL_PRESETS) {
+    assert.ok(MAKERS.includes(p.maker), `${p.id} のメーカー ${p.maker}`);
+    assert.ok(Array.isArray(p.body) && p.body.length > 0, `${p.id} のボディタイプ`);
+    for (const b of p.body) assert.ok(b in BODY_TYPES, `${p.id} のボディタイプ ${b}`);
+  }
+  // どのボディタイプにも車種がある
+  for (const b of Object.keys(BODY_TYPES)) assert.ok(filterPresets({ body: b }).length > 0, b);
+  assert.ok(ALL_PRESETS.length >= 60);
+});
+
+test('絞り込み：メーカー・ボディタイプ・両方', () => {
+  const toyota = filterPresets({ maker: 'トヨタ' });
+  assert.ok(toyota.length > 0 && toyota.every((p) => p.maker === 'トヨタ'));
+  const suv = filterPresets({ body: 'suv' });
+  assert.ok(suv.every((p) => p.body.includes('suv')));
+  const mazdaCompact = filterPresets({ maker: 'マツダ', body: 'compact' });
+  assert.ok(mazdaCompact.some((p) => p.model.includes('デミオ')));
+  // コンパクトかつスポーツの車はどちらでも出てくる
+  assert.ok(filterPresets({ body: 'compact' }).some((p) => p.id === 'gr-yaris'));
+  assert.ok(filterPresets({ body: 'sports' }).some((p) => p.id === 'gr-yaris'));
+  assert.equal(filterPresets().length, ALL_PRESETS.length);
+});
+
+test('メーカーごとのまとまりは表示順どおりで、空のメーカーは出さない', () => {
+  const groups = groupByMaker(filterPresets({ body: 'kei' }));
+  const order = groups.map((g) => MAKERS.indexOf(g.maker));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.ok(groups.every((g) => g.items.length > 0));
+  assert.ok(!groups.some((g) => g.maker === 'ポルシェ'));
 });
 
 test('プリセット：諸元が妥当な範囲にあり、計算に使えるキーを持つ', () => {
   for (const p of ALL_PRESETS) {
     const s = p.specs;
     const name = `${p.maker} ${p.model}`;
-    assert.ok(s.massKg >= 500 && s.massKg <= 2500, `${name} 重量`);
+    assert.ok(s.massKg >= 500 && s.massKg <= 3000, `${name} 重量`);
     assert.ok(s.frontRatio >= 0.3 && s.frontRatio <= 0.7, `${name} 前後配分`);
     assert.ok(s.widthMm >= 1400 && s.widthMm <= 2000, `${name} 全幅`);
     assert.ok(s.heightMm >= 1000 && s.heightMm <= 2000, `${name} 全高`);
@@ -35,8 +70,16 @@ test('プリセット：全車種で乾燥路の限界横G が現実的な範囲
   for (const p of ALL_PRESETS) {
     const veh = deriveVehicle({ ...presetToVehicle(p), payloadKg: 60 });
     const s = solveCorner(50, veh, dry);
-    assert.ok(s.aLatG > 0.7 && s.aLatG < 1.4, `${p.model}: ${s.aLatG.toFixed(2)} G`);
+    // 背の高い軽・ミニバン・ジムニー（オフロードタイヤ）は 0.7G 前後まで下がる
+    assert.ok(s.aLatG > 0.6 && s.aLatG < 1.4, `${p.model}: ${s.aLatG.toFixed(2)} G`);
   }
+});
+
+test('プリセット：背の高い車・ミニバンは同じ FF のコンパクトより限界が低い', () => {
+  const g = (id) => solveCorner(50, deriveVehicle({ ...presetToVehicle(findPreset(id)), payloadKg: 60 }), dry).aLatG;
+  assert.ok(g('n-box') < g('yaris'));
+  assert.ok(g('noah-90') < g('corolla'));
+  assert.ok(g('jimny') < g('swift-sport'));
 });
 
 test('プリセット：Sタイヤの 911 GT3 は純正タイヤのアルトワークスより速く曲がれる', () => {
