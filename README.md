@@ -78,6 +78,22 @@
 
 ## 使い方
 
+### 画像で見る使い方
+
+実際のアプリ画面に番号と説明を付けた解説画像です（`docs/guide/`）。
+
+| | |
+| --- | --- |
+| [全体の流れ](docs/guide/01-overview.png) | タブの役割と「設定 → デモで確認 → 計測開始」 |
+| [STEP 1 車両を設定する](docs/guide/02-vehicle.png) | メーカー → ボディタイプ → 車種、重量・外寸・車高の変更 |
+| [STEP 2 走行画面の見方](docs/guide/03-drive.png) | 速度・警告・次のコーナー・現在のカーブ・路面・状態表示 |
+| [STEP 3 次のコーナーの読み方](docs/guide/04-next-corner.png) | 向き・きつさ・距離と秒数・安全上限・必要な減速・枠の色 |
+| [STEP 4 道路形状と地図](docs/guide/05-shape-and-map.png) | 次のコーナーの強調表示、現在地・地図の種類・現在地ボタン |
+| [STEP 5 計算タブで調べる](docs/guide/06-calc.png) | R・路面・勾配を入れて上限速度と速度表を見る |
+| [STEP 6 走行時の設定と注意](docs/guide/07-settings.png) | 警告音・音声案内・ジャイロ・地図・標高、必ず守ること |
+
+画面を変えたら `npm run guide` で作り直せます（Playwright が必要。`tools/guide/make-guide.cjs`）。
+
 ### スマートフォンで使う（GitHub Pages）
 
 位置情報・モーションセンサーは **https でしか使えません**。

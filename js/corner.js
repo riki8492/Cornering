@@ -69,8 +69,9 @@ export function isAnnounced(list, lat, lon, dir, radius = 40) {
 /**
  * 次のコーナーに対する今の状況
  * - ok：安全上限以下
- * - slow：安全上限を超えているが、無理なく減速できる
- * - danger：急ブレーキが必要、または限界を超えている
+ * - slow：安全上限を超えているが、入口までに無理なく減速できる
+ * - danger：入口までに強いブレーキ（0.3G 超）が必要、またはカーブの中で限界を超えている
+ * 入口までまだ距離があれば、限界を少し超えていても軽いブレーキで間に合うので danger にはしない
  * @param {number} v 今の速度 [m/s]
  * @param {{vRec:number, vLimit:number}} s
  * @param {number} dist 入口までの距離 [m]（カーブ中なら 0 以下）
@@ -78,7 +79,7 @@ export function isAnnounced(list, lat, lon, dir, radius = 40) {
  */
 export function approachState(v, s, dist, slope = 0) {
   if (!(v > s.vRec)) return 'ok';
-  if (v > s.vLimit) return 'danger';
+  if (dist <= 0 && v > s.vLimit) return 'danger';
   const d = Math.max(dist, 1);
   const aReq = (v * v - s.vRec * s.vRec) / (2 * d) - 9.80665 * slope;
   return aReq > 0.3 * 9.80665 ? 'danger' : 'slow';

@@ -1008,10 +1008,16 @@ function drawPreview(rr, ms, next = null) {
   ctx.font = '11px system-ui, sans-serif';
   ctx.lineWidth = 1;
   for (let d = 100; d < range; d += 100) {
+    const r = d * scale;
     ctx.beginPath();
-    ctx.arc(cx, cy, d * scale, Math.PI * 1.08, Math.PI * 1.92);
+    ctx.arc(cx, cy, r, Math.PI * 1.08, Math.PI * 1.92);
     ctx.stroke();
-    ctx.fillText(`${d}m`, cx + 4, cy - d * scale - 3);
+    // 道路（中央付近）や入口の距離表示と重ならないよう、目盛りの文字は弧の右端に置く
+    const label = `${d}m`;
+    const lw = ctx.measureText(label).width;
+    const ex = cx + r * Math.cos(Math.PI * 1.92);
+    const ey = cy + r * Math.sin(Math.PI * 1.92);
+    ctx.fillText(label, Math.min(w - lw - 4, ex - lw / 2), ey - 6);
   }
 
   const v = ms.speed;
