@@ -204,5 +204,8 @@ export function presetToVehicle(preset) {
     frontalAreaM2: null,
     rollStiffFrontPct: null,
     minTurnRadiusM: s.minTurnRadiusM ?? null,
+    // プリセットは純正状態
+    lowerFrontMm: null,
+    lowerRearMm: null,
   };
 }

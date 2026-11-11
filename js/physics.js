@@ -108,6 +108,12 @@ export const DRIVETRAINS = {
 const FZ0_BASE = 3500;
 const TIRE_WIDTH_BASE = 195;
 
+/**
+ * 車両重量のうち、ばね上（ボディ側）の割合。ローダウンしてもばね下
+ * （タイヤ・ホイール・ブレーキ・アーム類）は下がらないので、重心の下がり量はこの割合ぶんになる
+ */
+export const SPRUNG_FRACTION = 0.87;
+
 export const DEFAULT_VEHICLE = {
   massKg: 1300,
   frontAxleKg: 790,
@@ -129,6 +135,9 @@ export const DEFAULT_VEHICLE = {
   frontalAreaM2: null,
   rollStiffFrontPct: null,
   minTurnRadiusM: null,
+  // 車高の変更（下げた量 [mm]。上げた場合はマイナス）
+  lowerFrontMm: null,
+  lowerRearMm: null,
 };
 
 export const DEFAULT_ENV = {
@@ -230,7 +239,14 @@ export function deriveVehicle(input = {}) {
   const length = (pos(+p.lengthMm) ? +p.lengthMm : DEFAULT_VEHICLE.lengthMm) / 1000;
 
   const track = pos(+p.trackMm) ? +p.trackMm / 1000 : estimateTrack(width);
-  const cgHeight = pos(+p.cgHeightMm) ? +p.cgHeightMm / 1000 : estimateCgHeight(height);
+  // 純正状態の重心高（入力値、無ければ全高から推定）
+  const cgHeightBase = pos(+p.cgHeightMm) ? +p.cgHeightMm / 1000 : estimateCgHeight(height);
+  // ローダウン：重心の前後位置でのボディの下がり量（前後の下げ量を軸重比で内分）× ばね上の割合
+  const lowerF = clamp(Number(p.lowerFrontMm) || 0, -150, 150) / 1000;
+  const lowerR = clamp(Number(p.lowerRearMm) || 0, -150, 150) / 1000;
+  const bodyDropAtCg = lowerF * fr + lowerR * (1 - fr);
+  const cgDrop = bodyDropAtCg * SPRUNG_FRACTION;
+  const cgHeight = clamp(cgHeightBase - cgDrop, 0.2, 1.4);
   const wheelbase = pos(+p.wheelbaseMm) ? +p.wheelbaseMm / 1000 : estimateWheelbase(length);
   const cd = pos(+p.cd) ? +p.cd : estimateCd(height);
   const frontalArea = pos(+p.frontalAreaM2) ? +p.frontalAreaM2 : estimateFrontalArea(width, height);
@@ -254,6 +270,9 @@ export function deriveVehicle(input = {}) {
     length,
     track,
     cgHeight,
+    cgHeightBase,
+    bodyDropAtCg,
+    cgDrop,
     wheelbase,
     minTurnRadius,
     cd,

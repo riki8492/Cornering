@@ -7,6 +7,7 @@ import { DemElevation, gradeBetween } from './elevation.js';
 import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
 import { PRESET_GROUPS, findPreset, presetName, presetToVehicle } from './presets.js';
+import { loadLeaflet, DriveMap } from './mapview.js';
 
 const STORE_KEY = 'cornering.v1';
 const $ = (sel) => document.querySelector(sel);
@@ -15,7 +16,8 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const state = {
   vehicle: { ...P.DEFAULT_VEHICLE },
   env: { ...P.DEFAULT_ENV },
-  prefs: { sound: false, gyro: true, map: true, elevation: true },
+  // panel: 走行画面の下段（'shape' 道路形状 / 'map' 地図）、mapLayer: 地図の種類
+  prefs: { sound: false, gyro: true, map: true, elevation: true, panel: 'shape', mapLayer: 'gsi' },
   calcR: 50,
   calc: { entryElev: null, exitElev: null, angleDeg: 90 },
   axleAuto: 'rearAxleKg', // 自動補完した側の軸重（手入力された値は上書きしない）
@@ -97,6 +99,7 @@ function recompute() {
   speedAt = P.makeSpeedLookup(veh, state.env);
   renderDerived();
   renderAxleHint();
+  renderLowerHint();
   renderCalc();
   renderSurfaceChips();
   scheduleRender();
@@ -361,6 +364,21 @@ function kvRows(dl, rows) {
   }
 }
 
+function renderLowerHint() {
+  const el = $('#lower-hint');
+  if (Math.abs(veh.bodyDropAtCg) < 0.0005) {
+    el.textContent = '下げた量を入れると重心高を自動で補正します（上げた場合はマイナス）';
+    return;
+  }
+  const up = veh.bodyDropAtCg < 0;
+  const body = Math.round(Math.abs(veh.bodyDropAtCg) * 1000);
+  const cg = Math.round(Math.abs(veh.cgDrop) * 1000);
+  el.textContent =
+    `重心の位置でボディが約 ${body} mm ${up ? '上がり' : '下がり'}、重心高は約 ${cg} mm ${up ? '高く' : '低く'}なります` +
+    `（タイヤ・ブレーキなどのばね下は動かないので、約 ${Math.round(P.SPRUNG_FRACTION * 100)}% ぶん）。` +
+    `重心高 ${Math.round(veh.cgHeightBase * 1000)} → ${Math.round(veh.cgHeight * 1000)} mm`;
+}
+
 function renderDerived() {
   const est = (key) => (Number(state.vehicle[key]) > 0 ? '' : '（推定）');
   const pct = Math.round(veh.frontRatio * 100);
@@ -368,7 +386,12 @@ function renderDerived() {
     ['総重量（乗員・積載込み）', `${Math.round(veh.m)} kg`],
     ['前後重量配分', `${pct} : ${100 - pct}`],
     ['トレッド' + est('trackMm'), `${fmtNum(veh.track, 2)} m`],
-    ['重心高' + est('cgHeightMm'), `${fmtNum(veh.cgHeight, 2)} m`],
+    [
+      '重心高' + est('cgHeightMm'),
+      Math.abs(veh.cgDrop) >= 0.0005
+        ? `${fmtNum(veh.cgHeight, 3)} m（純正 ${fmtNum(veh.cgHeightBase, 3)} m ${veh.cgDrop > 0 ? '−' : '＋'} ${Math.round(Math.abs(veh.cgDrop) * 1000)} mm）`
+        : `${fmtNum(veh.cgHeight, 2)} m`,
+    ],
     ['静的安定係数 SSF', fmtNum(veh.ssf, 2)],
     ['ホイールベース' + est('wheelbaseMm'), `${fmtNum(veh.wheelbase, 2)} m`],
     ['最小回転半径' + est('minTurnRadiusM'), `${fmtNum(veh.minTurnRadius, 1)} m`],
@@ -493,8 +516,117 @@ let wakeLock = null;
 let gpsError = '';
 let lastFixAt = 0;
 
+// ---------- 地図（現在地） ----------
+const track = []; // 走った軌跡 [lat, lon]
+let driveMap = null;
+let mapError = '';
+
+function addTrackPoint(lat, lon) {
+  const last = track[track.length - 1];
+  if (last) {
+    const dy = (lat - last[0]) * 111195;
+    const dx = (lon - last[1]) * 111195 * Math.cos((lat * Math.PI) / 180);
+    if (dx * dx + dy * dy < 9) return; // 3m 未満は間引く
+  }
+  track.push([lat, lon]);
+  if (track.length > 5000) track.splice(0, track.length - 5000);
+}
+
+async function ensureMap() {
+  if (driveMap) return driveMap;
+  try {
+    const L = await loadLeaflet();
+    if (!driveMap) {
+      driveMap = new DriveMap(L, $('#map'), {
+        baseLayer: state.prefs.mapLayer,
+        onBaseLayerChange: (key) => {
+          state.prefs.mapLayer = key;
+          save();
+        },
+      });
+    }
+    mapError = '';
+  } catch (e) {
+    mapError = `${e.message}（オフライン？）`;
+  }
+  scheduleRender();
+  return driveMap;
+}
+
+/** 走行画面の下段の表示を切り替える */
+function showPanel(name) {
+  const panel = name === 'map' ? 'map' : 'shape';
+  state.prefs.panel = panel;
+  save();
+  for (const b of $$('.panel-switch button')) b.setAttribute('aria-selected', String(b.dataset.panel === panel));
+  $('#preview').hidden = panel !== 'shape';
+  $('#map').hidden = panel !== 'map';
+  if (panel === 'map') {
+    ensureMap().then((m) => {
+      m?.invalidate();
+      scheduleRender();
+    });
+  }
+  scheduleRender();
+}
+
+function bindPanels() {
+  for (const b of $$('.panel-switch button')) b.addEventListener('click', () => showPanel(b.dataset.panel));
+  showPanel(state.prefs.panel);
+}
+
+/** この先の道路を、色ごとのひと続きの線に分けて緯度経度にする */
+function aheadRuns(rr, v) {
+  if (!rr || !road.net) return [];
+  const { pts, kappa, idx0, ds, elev } = rr.profile;
+  const toLL = (p) => {
+    const ll = road.net.proj.toLatLon(p.x, p.y);
+    return [ll.lat, ll.lon];
+  };
+  const runs = [];
+  let cur = null;
+  for (let i = Math.max(1, idx0 + 1); i < pts.length; i++) {
+    const color = speedColor(kappa[i], elev ? gradeBetween(elev, i - 3, i + 3, ds) : 0, v);
+    if (!cur || cur.color !== color) {
+      cur = { color, latlngs: [toLL(pts[i - 1])] };
+      runs.push(cur);
+    }
+    cur.latlngs.push(toLL(pts[i]));
+  }
+  return runs;
+}
+
+function updateMap(rr, ms) {
+  const hint = $('#map-hint');
+  const fix = motion.lastFix;
+  const msg = mapError || (!driveMap ? '地図を読み込み中…' : !fix ? '計測開始で現在地を表示します' : '');
+  hint.hidden = !msg;
+  hint.textContent = msg;
+  if (!driveMap || !fix) return;
+  const curves = rr
+    ? rr.curves
+        .filter((c) => c.distApex >= 0)
+        .map((c) => {
+          const ll = road.net.proj.toLatLon(rr.profile.pts[c.apexIdx].x, rr.profile.pts[c.apexIdx].y);
+          const g = c.gradePct || 0;
+          const gl = Math.abs(g) >= 2 ? ` ${g > 0 ? '↗' : '↘'}${Math.abs(g).toFixed(0)}%` : '';
+          return { lat: ll.lat, lon: ll.lon, label: `R${Math.round(c.R)}${gl}` };
+        })
+    : [];
+  driveMap.update({
+    lat: fix.lat,
+    lon: fix.lon,
+    accuracy: ms.accuracy,
+    heading: ms.speed > 1.5 ? ms.heading : null,
+    track,
+    ahead: aheadRuns(rr, ms.speed),
+    curves,
+  });
+}
+
 function onFix(fix) {
   motion.addFix(fix);
+  addTrackPoint(fix.lat, fix.lon);
   lastFixAt = Date.now();
   gpsError = '';
   road.update(fix, motion.state);
@@ -547,6 +679,8 @@ async function start(kind) {
   motion.reset();
   gpsError = '';
   gradeFallback = null;
+  track.length = 0;
+  driveMap?.reset();
   mode = kind;
   if (kind === 'demo') {
     demo = startDemo({
@@ -555,6 +689,8 @@ async function start(kind) {
       onLoop: () => {
         motion.reset();
         road.reset();
+        track.length = 0;
+        driveMap?.reset();
       },
     });
     dem = state.prefs.elevation ? demo.elevation : null;
@@ -700,8 +836,23 @@ function arrowSvg(dir, R) {
 }
 
 // ---------- 前方プレビュー ----------
+const cssCache = new Map();
 function cssVar(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  let v = cssCache.get(name);
+  if (v == null) {
+    v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    cssCache.set(name, v);
+  }
+  return v;
+}
+
+/** 道路の色：直線は灰色、カーブは今の速度が安全上限以下なら緑、超えたら橙、限界超えなら赤 */
+function speedColor(kappa, grade, v) {
+  if (Math.abs(kappa) < 1 / 600) return '#3b4a5c';
+  const s = speedAt(1 / Math.abs(kappa), grade);
+  if (v > s.vLimit) return cssVar('--danger');
+  if (v > s.vRec) return cssVar('--warn');
+  return cssVar('--accent');
 }
 
 function drawPreview(rr, ms) {
@@ -737,13 +888,7 @@ function drawPreview(rr, ms) {
   }
 
   const v = ms.speed;
-  const colorFor = (k, grade = 0) => {
-    if (Math.abs(k) < 1 / 600) return '#3b4a5c';
-    const s = speedAt(1 / Math.abs(k), grade);
-    if (v > s.vLimit) return cssVar('--danger');
-    if (v > s.vRec) return cssVar('--warn');
-    return cssVar('--accent');
-  };
+  const colorFor = (k, grade = 0) => speedColor(k, grade, v);
 
   if (rr) {
     const { pts, kappa, idx0, ds, elev } = rr.profile;
@@ -912,7 +1057,10 @@ function renderDrive() {
         ? `OK${dem.source ? `（${dem.source}）` : ''}`
         : MAP_STATUS[dem.status] || dem.status;
 
-  if ($('#view-drive').classList.contains('active')) drawPreview(rr, ms);
+  if ($('#view-drive').classList.contains('active')) {
+    if (state.prefs.panel === 'map') updateMap(rr, ms);
+    else drawPreview(rr, ms);
+  }
 }
 
 let renderQueued = false;
@@ -932,6 +1080,8 @@ function bindTabs() {
       for (const x of $$('.tabbar button')) x.classList.toggle('active', x === b);
       for (const v of $$('.view')) v.classList.toggle('active', v.id === `view-${b.dataset.view}`);
       window.scrollTo(0, 0);
+      // 非表示の間はサイズが 0 なので、戻ったときに地図の大きさを測り直す
+      if (b.dataset.view === 'drive') requestAnimationFrame(() => driveMap?.invalidate());
       scheduleRender();
     });
   }
@@ -943,6 +1093,7 @@ function init() {
   bindForms();
   bindPresets();
   bindTabs();
+  bindPanels();
   $('#btn-start').addEventListener('click', () => (mode === 'gps' ? stop() : start('gps')));
   $('#btn-demo').addEventListener('click', () => (mode === 'demo' ? stop() : start('demo')));
   window.addEventListener('resize', scheduleRender);

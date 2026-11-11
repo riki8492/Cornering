@@ -67,7 +67,15 @@
           </div>
         </article>
 
-        <canvas id="preview" class="preview" aria-label="この先の道路形状"></canvas>
+        <div class="panel-switch" role="tablist" aria-label="表示の切り替え">
+          <button type="button" role="tab" data-panel="shape" aria-selected="true">道路形状</button>
+          <button type="button" role="tab" data-panel="map" aria-selected="false">地図・現在地</button>
+        </div>
+        <div class="panel-box">
+          <canvas id="preview" class="preview" aria-label="この先の道路形状"></canvas>
+          <div id="map" class="map" hidden></div>
+          <p class="map-hint" id="map-hint" hidden></p>
+        </div>
 
         <div class="chips" id="surface-chips" role="radiogroup" aria-label="路面状態"></div>
 
@@ -187,7 +195,23 @@
               <div class="with-unit"><input data-veh="lengthMm" type="number" inputmode="numeric" min="2000" step="5" /><em>mm</em></div>
             </label>
           </div>
-          <p class="hint">車検証の「長さ・幅・高さ」の値（cm 表記なら ×10）でOK</p>
+          <p class="hint">車検証の「長さ・幅・高さ」の値（cm 表記なら ×10）でOK。ローダウンしていても全高は純正の値のまま</p>
+        </article>
+
+        <article class="card">
+          <header><h2>車高の変更</h2><span class="tag">任意</span></header>
+          <div class="form-grid">
+            <label class="field">
+              <span>フロントの下げ量</span>
+              <div class="with-unit"><input data-veh="lowerFrontMm" type="number" step="5" min="-150" max="150" placeholder="0" /><em>mm</em></div>
+            </label>
+            <label class="field">
+              <span>リアの下げ量</span>
+              <div class="with-unit"><input data-veh="lowerRearMm" type="number" step="5" min="-150" max="150" placeholder="0" /><em>mm</em></div>
+            </label>
+          </div>
+          <p class="hint" id="lower-hint"></p>
+          <p class="hint">バネレートや減衰力は、一定速で回り続けるときの限界にはほとんど効きません（左右の荷重移動の総量は重心高とトレッドで決まるため）。前後どちらを硬くしたかで前後バランスが変わるので、分かれば詳細設定の「前輪側ロール剛性配分」で調整してください</p>
         </article>
 
         <article class="card">
@@ -225,7 +249,7 @@
               <div class="with-unit"><input data-veh="trackMm" type="number" inputmode="numeric" step="5" /><em>mm</em></div>
             </label>
             <label class="field">
-              <span>重心高</span>
+              <span>重心高（純正状態）</span>
               <div class="with-unit"><input data-veh="cgHeightMm" type="number" inputmode="numeric" step="5" /><em>mm</em></div>
             </label>
             <label class="field">
@@ -297,6 +321,7 @@
             <li><b>この先のカーブ（地図）</b>：OpenStreetMap の道路形状に現在地を当てはめ、道なりに先読みして曲率を計算します。交差点では最も直進に近い道を選びます</li>
             <li><b>現在のカーブ（計測）</b>：ジャイロのヨーレート ω から R = v / ω、ジャイロが無ければ GPS の進行方位の変化率、さらに無ければ GPS 軌跡への円の当てはめで求めます</li>
             <li><b>入口・出口の標高</b>：国土地理院の標高タイル（10m メッシュ）を道路に沿って引き、カーブの入口と出口の標高差から勾配を求めます（国外は AWS Terrain Tiles）。橋・トンネルは地表の標高が使えないので前後から補間します</li>
+            <li><b>地図・現在地</b>：走行画面の「地図・現在地」で、現在地（進行方向の矢印）・走った軌跡・この先の道路（色分け）とカーブの R を地図上に表示します。地図を指で動かすと追従が止まり、「現在地」ボタンで戻ります。右上のボタンで地理院地図・航空写真・OpenStreetMap を切り替えられます</li>
           </ul>
         </article>
 
