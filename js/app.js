@@ -6,7 +6,15 @@ import { RoadTracker } from './roadmap.js';
 import { DemElevation, gradeBetween } from './elevation.js';
 import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
-import { PRESET_GROUPS, findPreset, presetName, presetToVehicle } from './presets.js';
+import {
+  BODY_TYPES,
+  MAKER_GROUPS,
+  filterPresets,
+  groupByMaker,
+  findPreset,
+  presetName,
+  presetToVehicle,
+} from './presets.js';
 import { loadLeaflet, DriveMap } from './mapview.js';
 import { classifyCorner, dirLabel, secondsTo, announceDistance, cornerSpeech, isAnnounced, approachState } from './corner.js';
 
@@ -24,6 +32,7 @@ const state = {
   axleAuto: 'rearAxleKg', // 自動補完した側の軸重（手入力された値は上書きしない）
   presetId: null, // 選んだ車種プリセット
   presetEdited: false, // プリセットを選んだあとに手で変えたか
+  presetFilter: { maker: '', body: '' }, // 車種選びの絞り込み（起動時に選択中の車種から決め直す）
 };
 
 function load() {
@@ -220,25 +229,79 @@ function applyPreset(id) {
   renderPresetHint();
 }
 
-function bindPresets() {
+const option = (value, text) => {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  return o;
+};
+
+/** メーカー・ボディタイプの絞り込みに合わせて車種の選択肢を作り直す */
+function renderPresetOptions() {
+  const f = state.presetFilter;
+  const list = filterPresets(f);
   const sel = $('#preset-select');
-  const none = document.createElement('option');
-  none.value = '';
-  none.textContent = '選択しない（手入力）';
-  sel.append(none);
-  for (const g of PRESET_GROUPS) {
+  sel.innerHTML = '';
+  sel.append(option('', list.length ? '選択しない（手入力）' : '該当する車種がありません'));
+  if (f.maker) {
+    for (const pr of list) sel.append(option(pr.id, `${pr.model}　${pr.grade}`));
+  } else {
+    // メーカーを絞っていないときはメーカーごとにまとめる
+    for (const g of groupByMaker(list)) {
+      const og = document.createElement('optgroup');
+      og.label = g.maker;
+      for (const pr of g.items) og.append(option(pr.id, `${pr.model}　${pr.grade}`));
+      sel.append(og);
+    }
+  }
+  sel.value = list.some((x) => x.id === state.presetId) ? state.presetId : '';
+  $('#preset-count').textContent = `${list.length} 車種`;
+}
+
+function bindPresets() {
+  // 選んである車種があれば、そのメーカーで絞った状態から始める
+  const current = findPreset(state.presetId);
+  state.presetFilter = { maker: current ? current.maker : '', body: '' };
+
+  const makerSel = $('#preset-maker');
+  makerSel.append(option('', 'すべてのメーカー'));
+  for (const g of MAKER_GROUPS) {
     const og = document.createElement('optgroup');
     og.label = g.label;
-    for (const pr of g.items) {
-      const o = document.createElement('option');
-      o.value = pr.id;
-      o.textContent = `${pr.maker} ${pr.model}　${pr.grade}`;
-      og.append(o);
+    for (const m of g.makers) {
+      const n = filterPresets({ maker: m }).length;
+      if (n) og.append(option(m, `${m}（${n}）`));
     }
-    sel.append(og);
+    makerSel.append(og);
   }
-  sel.value = state.presetId || '';
-  sel.addEventListener('change', () => applyPreset(sel.value));
+  makerSel.value = state.presetFilter.maker;
+
+  const bodySel = $('#preset-body');
+  bodySel.append(option('', 'すべてのタイプ'));
+  for (const [key, label] of Object.entries(BODY_TYPES)) bodySel.append(option(key, label));
+  bodySel.value = state.presetFilter.body;
+
+  makerSel.addEventListener('change', () => {
+    state.presetFilter.maker = makerSel.value;
+    renderPresetOptions();
+  });
+  bodySel.addEventListener('change', () => {
+    state.presetFilter.body = bodySel.value;
+    renderPresetOptions();
+  });
+  const sel = $('#preset-select');
+  sel.addEventListener('change', () => {
+    // 「選択しない」に戻したときは入力値を変えない（手入力に切り替えるだけ）
+    if (!sel.value) {
+      state.presetId = null;
+      state.presetEdited = false;
+      save();
+      renderPresetHint();
+      return;
+    }
+    applyPreset(sel.value);
+  });
+  renderPresetOptions();
   renderPresetHint();
 }
 

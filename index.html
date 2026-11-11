@@ -152,10 +152,20 @@
       <section id="view-vehicle" class="view" aria-label="車両">
         <article class="card">
           <header><h2>車種から入力</h2><span class="tag">任意</span></header>
-          <label class="field">
-            <span>人気の車種（代表グレードの目安値）</span>
-            <select id="preset-select"></select>
-          </label>
+          <div class="form-grid">
+            <label class="field">
+              <span>メーカー</span>
+              <select id="preset-maker"></select>
+            </label>
+            <label class="field">
+              <span>ボディタイプ</span>
+              <select id="preset-body"></select>
+            </label>
+            <label class="field wide">
+              <span>車種（代表グレードの目安値） <b id="preset-count"></b></span>
+              <select id="preset-select"></select>
+            </label>
+          </div>
           <p class="hint" id="preset-hint"></p>
         </article>
 
