@@ -5,6 +5,60 @@
 
 ビルド不要の静的サイトなので、GitHub Pages などに置けばスマートフォンのブラウザでそのまま使えます。
 
+**アプリ：https://riki8492.github.io/Cornering/**
+
+## 使い方
+
+### スマホで開く
+
+1. 上の URL を Safari（iPhone）か Chrome（Android）で開き、共有メニューから**「ホーム画面に追加」**。アプリのように起動でき、計測中は画面が消えません
+2. 「計測開始」を押したら位置情報を**「許可」**。iPhone はモーションセンサー（ジャイロ）の許可も求められるので許可します
+3. 最初は家で「デモ走行」を動かして、見え方と音声案内を確認しておくと安心です
+
+### 画像で見る使い方
+
+実際のアプリ画面に番号と説明を付けた解説です（例の車両はアコードツアラー CW2・前 20mm／後 25mm ダウン）。
+
+#### 全体の流れ — 設定 → デモで確認 → 計測開始
+
+<img src="docs/guide/01-overview.png" width="420" alt="全体の流れ：4 つのタブの役割と、計測開始・デモ走行のボタン">
+
+#### STEP 1 車両を設定する
+
+メーカー → ボディタイプ → 車種で選ぶと諸元が一括で入ります。車検証の軸重や車高の変更があれば上書きします。
+
+<img src="docs/guide/02-vehicle.png" width="420" alt="車両の設定：車種から入力、重量、外寸、車高の変更">
+
+#### STEP 2 走行画面の見方
+
+スマホはホルダーに固定して「計測開始」。走行中は画面を操作せず、音声案内と色で状況をつかみます。
+
+<img src="docs/guide/03-drive.png" width="420" alt="走行画面：速度、警告、次のコーナー、現在のカーブ、道路形状、路面、状態表示">
+
+#### STEP 3 次のコーナーの読み方
+
+カードの枠の色が、今の速度でそのコーナーに入って大丈夫かを表します（緑：安全上限以下／橙：減速が必要／赤：強いブレーキが必要かカーブの中で限界超え）。
+
+<img src="docs/guide/04-next-corner.png" width="420" alt="次のコーナーのカード：向き・きつさ、距離と秒数、R・標高・勾配、安全上限・理論限界、必要な減速、接近バー">
+
+#### STEP 4 道路形状と地図
+
+走行画面の下段は「道路形状」と「地図・現在地」を切り替えられます。どちらも次のコーナーだけが強調されます。
+
+<img src="docs/guide/05-shape-and-map.png" width="420" alt="道路形状と地図：次のコーナーの強調、入口の線、自車、現在地、地図の種類、現在地ボタン">
+
+#### STEP 5 計算タブで調べる
+
+走る前に、気になるカーブの上限速度を机上で調べられます。
+
+<img src="docs/guide/06-calc.png" width="420" alt="計算タブ：カーブ半径、路面・片勾配、入口・出口の標高、安全係数、結果、半径別の速度表">
+
+#### STEP 6 走行時の設定と注意
+
+車両タブのいちばん下で設定します。走行中に画面を見なくて済むよう、音声案内がおすすめです。
+
+<img src="docs/guide/07-settings.png" width="420" alt="走行時の設定：警告音、音声案内、ジャイロ、地図データ、標高データ。必ず守ること">
+
 ## できること
 
 | 画面 | 内容 |
@@ -76,39 +130,25 @@
 - **入口・出口の標高**：[国土地理院 標高タイル](https://maps.gsi.go.jp/development/demtile.html)（DEM10B、ズーム14）を道路に沿って 5 m 間隔で引き、±15 m で平滑化。橋・トンネル（OSM の `bridge` / `tunnel` タグ）は地表の標高が使えないので前後から直線補間。地理院タイルが無い国外などは [AWS Terrain Tiles](https://registry.opendata.aws/terrain-tiles/)（Terrarium）を使用
 - **現在のカーブ**：ジャイロのヨーレート ω から `R = v / ω`（端末の向きに依存しないよう重力方向まわりの角速度を使用）。ジャイロが無ければ GPS 進行方位の変化率、それも無ければ GPS 軌跡への円フィッティング
 
-## 使い方
+## 開発・公開
 
-### 画像で見る使い方
-
-実際のアプリ画面に番号と説明を付けた解説画像です（`docs/guide/`）。
-
-| | |
-| --- | --- |
-| [全体の流れ](docs/guide/01-overview.png) | タブの役割と「設定 → デモで確認 → 計測開始」 |
-| [STEP 1 車両を設定する](docs/guide/02-vehicle.png) | メーカー → ボディタイプ → 車種、重量・外寸・車高の変更 |
-| [STEP 2 走行画面の見方](docs/guide/03-drive.png) | 速度・警告・次のコーナー・現在のカーブ・路面・状態表示 |
-| [STEP 3 次のコーナーの読み方](docs/guide/04-next-corner.png) | 向き・きつさ・距離と秒数・安全上限・必要な減速・枠の色 |
-| [STEP 4 道路形状と地図](docs/guide/05-shape-and-map.png) | 次のコーナーの強調表示、現在地・地図の種類・現在地ボタン |
-| [STEP 5 計算タブで調べる](docs/guide/06-calc.png) | R・路面・勾配を入れて上限速度と速度表を見る |
-| [STEP 6 走行時の設定と注意](docs/guide/07-settings.png) | 警告音・音声案内・ジャイロ・地図・標高、必ず守ること |
-
-画面を変えたら `npm run guide` で作り直せます（Playwright が必要。`tools/guide/make-guide.cjs`）。
-
-### スマートフォンで使う（GitHub Pages）
+### GitHub Pages で公開する
 
 位置情報・モーションセンサーは **https でしか使えません**。
 
-1. GitHub のリポジトリ設定 → Pages → Source を「Deploy from a branch」、ブランチとフォルダ `/ (root)` を選んで保存
-2. 表示された URL をスマホで開き、「ホーム画面に追加」するとアプリのように起動できます
-3. iPhone では「計測開始」を押したときにモーションセンサーの許可を求められます
+1. GitHub のリポジトリ設定 → Pages → Source を「Deploy from a branch」、ブランチ `main`・フォルダ `/ (root)` を選んで保存
+2. 数分で `https://<ユーザー名>.github.io/Cornering/` が使えるようになる（無料プランでは公開リポジトリのみ）
 
 ### ローカルで動かす
 
 ```sh
 npm start        # python3 -m http.server 8000
 # → http://localhost:8000/ （PC の localhost なら位置情報も使えます）
-npm test         # 物理モデル・幾何・マップマッチングのテスト（Node.js 18+）
+npm test         # 物理モデル・幾何・マップマッチングなどのテスト（Node.js 18+）
+npm run guide    # 使い方の解説画像（docs/guide/）を作り直す（Playwright が必要）
 ```
+
+解説画像は `tools/guide/make-guide.cjs` が実際のアプリをヘッドレスブラウザで操作して撮影し、番号と説明を重ねて作っています。画面を変えたら `npm run guide` で作り直してください。
 
 ## ファイル構成
 
@@ -128,6 +168,8 @@ vendor/leaflet/       Leaflet 1.9.4（BSD-2-Clause、LICENSE 同梱）
 js/app.js             UI
 sw.js                 オフライン用 Service Worker
 tests/                node:test によるテスト
+docs/guide/           使い方の解説画像
+tools/guide/          解説画像を作るスクリプト（npm run guide）
 ```
 
 ## 注意
