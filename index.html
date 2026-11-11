@@ -36,20 +36,24 @@
 
         <div id="alert" class="alert" hidden></div>
 
-        <article class="card" id="card-next">
-          <header><h2>この先のカーブ</h2><span class="tag">地図</span></header>
+        <article class="card next-card" id="card-next">
+          <header><h2>次のコーナー</h2><span class="tag">地図</span></header>
           <div class="curve">
             <svg class="arrow" id="next-arrow" viewBox="0 0 48 48" aria-hidden="true"></svg>
             <div class="curve-main">
-              <div class="curve-dist" id="next-dist">--</div>
+              <div class="corner-title"><b id="next-dir"></b><span class="corner-class" id="next-class"></span></div>
+              <div class="curve-dist"><span id="next-dist">--</span><small id="next-eta"></small></div>
               <div class="curve-r">R <b id="next-r">--</b></div>
               <div class="curve-sub" id="next-elev"></div>
             </div>
             <div class="curve-speeds">
               <div><span>安全上限</span><b id="next-rec">--</b></div>
               <div><span>理論限界</span><b id="next-lim">--</b></div>
+              <div class="speed-delta" id="next-delta"></div>
             </div>
           </div>
+          <div class="approach" aria-hidden="true"><div class="approach-bar" id="next-bar"></div></div>
+          <p class="then" id="next-then"></p>
         </article>
 
         <article class="card" id="card-now">
@@ -288,6 +292,10 @@
               <span>速度超過・減速が必要なときに警告音を鳴らす</span>
             </label>
             <label class="field wide check">
+              <input data-pref="voice" type="checkbox" />
+              <span>次のコーナーを音声で読み上げる（例：「左、きつい、アール60、100メートル先、50キロまで減速」）</span>
+            </label>
+            <label class="field wide check">
               <input data-pref="gyro" type="checkbox" />
               <span>ジャイロセンサーで旋回半径を測る（端末を固定して使用）</span>
             </label>
@@ -321,6 +329,7 @@
             <li><b>この先のカーブ（地図）</b>：OpenStreetMap の道路形状に現在地を当てはめ、道なりに先読みして曲率を計算します。交差点では最も直進に近い道を選びます</li>
             <li><b>現在のカーブ（計測）</b>：ジャイロのヨーレート ω から R = v / ω、ジャイロが無ければ GPS の進行方位の変化率、さらに無ければ GPS 軌跡への円の当てはめで求めます</li>
             <li><b>入口・出口の標高</b>：国土地理院の標高タイル（10m メッシュ）を道路に沿って引き、カーブの入口と出口の標高差から勾配を求めます（国外は AWS Terrain Tiles）。橋・トンネルは地表の標高が使えないので前後から補間します</li>
+            <li><b>次のコーナー</b>：向き・きつさ（ヘアピン R30 未満／きつい 〜60／ややきつい 〜120／ゆるい 〜250／ごくゆるい）・入口までの距離と秒数を表示し、カードの色で状況を示します（緑：安全上限以下、橙：減速が必要、赤：急ブレーキが必要か限界超え）。道路形状と地図では次のコーナーだけを太い帯・入口の線・大きなラベルで強調します。設定で音声案内をオンにすると、入口の約 7 秒前に「左、きつい、アール60、100メートル先、50キロまで減速」のように読み上げます</li>
             <li><b>地図・現在地</b>：走行画面の「地図・現在地」で、現在地（進行方向の矢印）・走った軌跡・この先の道路（色分け）とカーブの R を地図上に表示します。地図を指で動かすと追従が止まり、「現在地」ボタンで戻ります。右上のボタンで地理院地図・航空写真・OpenStreetMap を切り替えられます</li>
           </ul>
         </article>

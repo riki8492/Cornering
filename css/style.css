@@ -357,6 +357,142 @@ details.card > summary::-webkit-details-marker {
   color: var(--warn);
 }
 
+/* ---------- 次のコーナー ---------- */
+.next-card {
+  --state: var(--line);
+  border-color: var(--state);
+  border-left-width: 6px;
+  transition: border-color 0.3s;
+}
+
+.next-card.state-ok {
+  --state: var(--accent);
+}
+
+.next-card.state-slow {
+  --state: var(--warn);
+}
+
+.next-card.state-danger {
+  --state: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger), 0 0 18px color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.next-card .arrow {
+  color: var(--state);
+}
+
+.next-card.state-none .arrow {
+  color: var(--muted);
+}
+
+.corner-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  line-height: 1.1;
+}
+
+.corner-title b {
+  font-size: 30px;
+  font-weight: 800;
+}
+
+.corner-class {
+  font-size: 15px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--card-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.corner-class:empty {
+  display: none;
+}
+
+/* きつさで色を変える（5 = ヘアピン） */
+.corner-class[data-level='5'] {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #2a0505;
+}
+
+.corner-class[data-level='4'] {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #2a1400;
+}
+
+.corner-class[data-level='3'] {
+  border-color: var(--caution);
+  color: var(--caution);
+}
+
+.next-card .curve-dist {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.next-card .curve-dist small {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.speed-delta {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.speed-delta.slow {
+  color: var(--warn);
+}
+
+.speed-delta.danger {
+  color: var(--danger);
+}
+
+.speed-delta:empty {
+  display: none;
+}
+
+.approach {
+  height: 8px;
+  margin-top: 12px;
+  border-radius: 999px;
+  background: var(--card-2);
+  overflow: hidden;
+}
+
+.approach-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--state);
+  transition: width 0.6s linear;
+}
+
+.then {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.then:empty {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .approach-bar,
+  .next-card {
+    transition: none;
+  }
+}
+
 .preview {
   display: block;
   width: 100%;
@@ -507,8 +643,37 @@ details.card > summary::-webkit-details-marker {
   padding: 2px 6px;
   border-radius: 6px;
   background: var(--card);
-  color: var(--text);
+  color: var(--muted);
   border: 1px solid var(--line);
+}
+
+/* 次のコーナーのラベルは大きく、状況の色で塗る */
+.curve-label.next span {
+  display: grid;
+  gap: 1px;
+  transform: translate(-50%, calc(-100% - 14px));
+  padding: 5px 9px;
+  border: 0;
+  background: var(--accent);
+  color: #071311;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 50%);
+}
+
+.curve-label.next.state-slow span {
+  background: var(--warn);
+}
+
+.curve-label.next.state-danger span {
+  background: var(--danger);
+}
+
+.curve-label.next b {
+  font-size: 15px;
+}
+
+.curve-label.next small {
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .chips {

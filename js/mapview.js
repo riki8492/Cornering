@@ -109,8 +109,11 @@ export class DriveMap {
 
     this.track = L.polyline([], { color: '#8b9aab', weight: 3, opacity: 0.6, interactive: false }).addTo(map);
     this.trackLen = 0;
+    // 次のコーナーの帯は道路の線より下に描く（追加順＝描画順）
+    this.nextBand = L.layerGroup().addTo(map);
     this.ahead = L.layerGroup().addTo(map);
     this.curves = L.layerGroup().addTo(map);
+    this.nextMarks = L.layerGroup().addTo(map);
     this.accuracy = null;
     this.marker = null;
     this.pos = null;
@@ -133,6 +136,8 @@ export class DriveMap {
     this.trackLen = 0;
     this.ahead.clearLayers();
     this.curves.clearLayers();
+    this.nextBand.clearLayers();
+    this.nextMarks.clearLayers();
     this.centered = false;
     this.setFollow(true);
   }
@@ -145,9 +150,11 @@ export class DriveMap {
    * @param {number|null} s.heading 北=0 の方位 [deg]
    * @param {Array<[number,number]>} s.track これまでの軌跡
    * @param {Array<{latlngs:Array<[number,number]>, color:string}>} s.ahead この先の道路（色分け済み）
-   * @param {Array<{lat:number,lon:number,label:string}>} s.curves カーブの頂点
+   * @param {Array<{lat:number,lon:number,label:string}>} s.curves カーブの頂点（次のコーナー以外）
+   * @param {{section:Array<[number,number]>, entry:[number,number]|null, apex:[number,number],
+   *          label:string, sub:string, color:string, state:string}|null} [s.next] 次のコーナー
    */
-  update({ lat, lon, accuracy, heading, track, ahead = [], curves = [] }) {
+  update({ lat, lon, accuracy, heading, track, ahead = [], curves = [], next = null }) {
     const L = this.L;
     const ll = [lat, lon];
     this.pos = ll;
@@ -168,6 +175,35 @@ export class DriveMap {
         interactive: false,
         keyboard: false,
       }).addTo(this.curves);
+    }
+
+    // 次のコーナー：太い帯・入口の印・大きなラベル
+    this.nextBand.clearLayers();
+    this.nextMarks.clearLayers();
+    if (next) {
+      if (next.section.length > 1) {
+        L.polyline(next.section, { color: next.color, weight: 18, opacity: 0.35, interactive: false }).addTo(this.nextBand);
+      }
+      if (next.entry) {
+        L.circleMarker(next.entry, {
+          radius: 7,
+          color: '#e6edf3',
+          weight: 3,
+          fillColor: next.color,
+          fillOpacity: 1,
+          interactive: false,
+        }).addTo(this.nextMarks);
+      }
+      L.marker(next.apex, {
+        icon: L.divIcon({
+          className: `curve-label next state-${next.state}`,
+          html: `<span><b>${next.label}</b><small>${next.sub}</small></span>`,
+          iconSize: null,
+        }),
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 900,
+      }).addTo(this.nextMarks);
     }
 
     if (Number.isFinite(accuracy) && accuracy > 0) {

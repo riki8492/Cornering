@@ -8,6 +8,7 @@ import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
 import { PRESET_GROUPS, findPreset, presetName, presetToVehicle } from './presets.js';
 import { loadLeaflet, DriveMap } from './mapview.js';
+import { classifyCorner, dirLabel, secondsTo, announceDistance, cornerSpeech, isAnnounced, approachState } from './corner.js';
 
 const STORE_KEY = 'cornering.v1';
 const $ = (sel) => document.querySelector(sel);
@@ -274,6 +275,8 @@ function bindForms() {
     el.addEventListener('change', () => {
       state.prefs[key] = el.checked;
       if (key === 'sound' && el.checked) ensureAudio();
+      // iOS は操作の中で一度しゃべらせないと、その後の読み上げが鳴らない
+      if (key === 'voice' && el.checked) speak('音声案内をオンにしました');
       save();
     });
   }
@@ -596,23 +599,43 @@ function aheadRuns(rr, v) {
   return runs;
 }
 
-function updateMap(rr, ms) {
+function updateMap(rr, ms, next = null) {
   const hint = $('#map-hint');
   const fix = motion.lastFix;
   const msg = mapError || (!driveMap ? '地図を読み込み中…' : !fix ? '計測開始で現在地を表示します' : '');
   hint.hidden = !msg;
   hint.textContent = msg;
   if (!driveMap || !fix) return;
+  const toLL = (p) => {
+    const ll = road.net.proj.toLatLon(p.x, p.y);
+    return [ll.lat, ll.lon];
+  };
+  const nc = next?.curve;
   const curves = rr
     ? rr.curves
-        .filter((c) => c.distApex >= 0)
+        .filter((c) => c.distApex >= 0 && c !== nc)
         .map((c) => {
-          const ll = road.net.proj.toLatLon(rr.profile.pts[c.apexIdx].x, rr.profile.pts[c.apexIdx].y);
+          const [lat, lon] = toLL(rr.profile.pts[c.apexIdx]);
           const g = c.gradePct || 0;
           const gl = Math.abs(g) >= 2 ? ` ${g > 0 ? '↗' : '↘'}${Math.abs(g).toFixed(0)}%` : '';
-          return { lat: ll.lat, lon: ll.lon, label: `R${Math.round(c.R)}${gl}` };
+          return { lat, lon, label: `R${Math.round(c.R)}${gl}` };
         })
     : [];
+  let nextMark = null;
+  if (rr && nc) {
+    const { pts, idx0 } = rr.profile;
+    const section = [];
+    for (let i = Math.max(idx0, nc.startIdx); i <= nc.endIdx; i++) section.push(toLL(pts[i]));
+    nextMark = {
+      section,
+      entry: nc.distStart > 0 ? toLL(pts[nc.startIdx]) : null,
+      apex: toLL(pts[nc.apexIdx]),
+      label: `${dirLabel(nc.dir)} ${next.cls.label} R${Math.round(nc.R)}`,
+      sub: nc.distStart > 0 ? `${Math.round(nc.distStart)}m 先・安全 ${fmtKmh(next.speeds.vRec)}km/h` : `安全 ${fmtKmh(next.speeds.vRec)}km/h`,
+      color: stateColor(next.state),
+      state: next.state,
+    };
+  }
   driveMap.update({
     lat: fix.lat,
     lon: fix.lon,
@@ -621,6 +644,7 @@ function updateMap(rr, ms) {
     track,
     ahead: aheadRuns(rr, ms.speed),
     curves,
+    next: nextMark,
   });
 }
 
@@ -676,10 +700,12 @@ function stop() {
 async function start(kind) {
   stop();
   if (state.prefs.sound) ensureAudio();
+  if (state.prefs.voice) speak('案内を開始します');
   motion.reset();
   gpsError = '';
   gradeFallback = null;
   track.length = 0;
+  announced.length = 0;
   driveMap?.reset();
   mode = kind;
   if (kind === 'demo') {
@@ -690,6 +716,7 @@ async function start(kind) {
         motion.reset();
         road.reset();
         track.length = 0;
+        announced.length = 0;
         driveMap?.reset();
       },
     });
@@ -764,6 +791,38 @@ function soundFor(alert) {
     beep(880, 2);
     lastBeep = now;
   }
+}
+
+// ---------- 音声案内 ----------
+const announced = []; // 読み上げ済みのコーナー区間 {dir, pts: [[lat, lon], ...]}
+const canSpeak = () => 'speechSynthesis' in window && typeof SpeechSynthesisUtterance === 'function';
+
+function speak(text) {
+  if (!canSpeak()) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ja-JP';
+  u.rate = 1.1;
+  window.speechSynthesis.speak(u);
+}
+
+/** 入口の約 7 秒前（80〜300m 手前）に一度だけ読み上げる */
+function maybeAnnounce(rr, nc, s, v) {
+  if (!state.prefs.voice || mode === 'off' || !road.net || !canSpeak()) return;
+  if (v < 3 || nc.distStart <= 15 || nc.distStart > announceDistance(v)) return;
+  const pts = rr.profile.pts;
+  const toLL = (p) => {
+    const ll = road.net.proj.toLatLon(p.x, p.y);
+    return [ll.lat, ll.lon];
+  };
+  const [lat, lon] = toLL(pts[nc.apexIdx]);
+  if (isAnnounced(announced, lat, lon, nc.dir)) return;
+  // 区間全体を約 10m おきに覚える（長いカーブで頂点が動いても同じと分かるように）
+  const section = [];
+  for (let i = nc.startIdx; i <= nc.endIdx; i += 2) section.push(toLL(pts[i]));
+  section.push(toLL(pts[nc.endIdx]));
+  announced.push({ dir: nc.dir, pts: section });
+  if (announced.length > 50) announced.shift();
+  speak(cornerSpeech(nc, s.vRec, v));
 }
 
 // ---------- 判定 ----------
@@ -855,7 +914,12 @@ function speedColor(kappa, grade, v) {
   return cssVar('--accent');
 }
 
-function drawPreview(rr, ms) {
+/** 接近の状況の色 */
+function stateColor(st) {
+  return st === 'danger' ? cssVar('--danger') : st === 'slow' ? cssVar('--warn') : cssVar('--accent');
+}
+
+function drawPreview(rr, ms, next = null) {
   const cv = $('#preview');
   const w = cv.clientWidth;
   const h = cv.clientHeight;
@@ -904,6 +968,24 @@ function drawPreview(rr, ms) {
       return [cx + (dx * c - dy * s) * scale, cy - (dx * s + dy * c) * scale];
     };
     ctx.lineCap = 'round';
+    const nc = next?.curve;
+    const nColor = next ? stateColor(next.state) : null;
+
+    // 次のコーナーの区間を太い帯で下敷きにする
+    if (nc) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = nColor;
+      ctx.lineWidth = 20;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      const i0 = Math.max(idx0, nc.startIdx);
+      ctx.moveTo(...tx(pts[i0]));
+      for (let i = i0 + 1; i <= nc.endIdx; i++) ctx.lineTo(...tx(pts[i]));
+      ctx.stroke();
+      ctx.restore();
+    }
+
     ctx.lineWidth = 7;
     for (let i = 1; i < pts.length; i++) {
       ctx.strokeStyle = i <= idx0 ? '#2a3542' : colorFor(kappa[i], elev ? gradeBetween(elev, i - 3, i + 3, ds) : 0);
@@ -912,16 +994,65 @@ function drawPreview(rr, ms) {
       ctx.lineTo(...tx(pts[i]));
       ctx.stroke();
     }
-    ctx.font = 'bold 13px system-ui, sans-serif';
+
+    // ほかのカーブは控えめなラベル
+    ctx.font = '12px system-ui, sans-serif';
     for (const cv2 of rr.curves) {
-      if (cv2.distApex < 0) continue;
+      if (cv2.distApex < 0 || cv2 === nc) continue;
       const [x, y] = tx(pts[cv2.apexIdx]);
       if (y < 0 || x < 0 || x > w) continue;
       const g = cv2.gradePct || 0;
       const label = `R${Math.round(cv2.R)}${Math.abs(g) >= 2 ? (g > 0 ? ' ↗' : ' ↘') + Math.abs(g).toFixed(0) + '%' : ''}`;
       const off = cv2.dir === 'left' ? -12 - ctx.measureText(label).width : 12;
-      ctx.fillStyle = cssVar('--text');
+      ctx.fillStyle = muted;
       ctx.fillText(label, x + off, y + 4);
+    }
+
+    if (nc) {
+      // 入口の線（道路に直交）と距離
+      if (nc.distStart > 0) {
+        const i = Math.min(pts.length - 2, Math.max(1, nc.startIdx));
+        const [ex, ey] = tx(pts[i]);
+        const [ax, ay] = tx(pts[i - 1]);
+        const [bx, by] = tx(pts[i + 1]);
+        const len = Math.hypot(bx - ax, by - ay) || 1;
+        const nx = -(by - ay) / len;
+        const ny = (bx - ax) / len;
+        ctx.strokeStyle = cssVar('--text');
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(ex - nx * 14, ey - ny * 14);
+        ctx.lineTo(ex + nx * 14, ey + ny * 14);
+        ctx.stroke();
+        ctx.font = 'bold 12px system-ui, sans-serif';
+        ctx.fillStyle = cssVar('--text');
+        const t = `${Math.round(nc.distStart)}m`;
+        const side = nc.dir === 'left' ? 1 : -1; // カーブと反対側に書く
+        const tw = ctx.measureText(t).width;
+        ctx.fillText(t, side > 0 ? ex + 20 : ex - 20 - tw, ey + 4);
+      }
+      // 頂点に大きな吹き出し：「左 きつい R60」＋安全上限
+      const [px, py] = tx(pts[nc.apexIdx]);
+      const line1 = `${dirLabel(nc.dir)} ${next.cls.label} R${Math.round(nc.R)}`;
+      const line2 = `安全 ${fmtKmh(next.speeds.vRec)} km/h`;
+      ctx.font = 'bold 15px system-ui, sans-serif';
+      const w1 = ctx.measureText(line1).width;
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      const w2 = ctx.measureText(line2).width;
+      const bw = Math.max(w1, w2) + 16;
+      const bh = 42;
+      let bx = nc.dir === 'left' ? px - 16 - bw : px + 16;
+      bx = Math.max(4, Math.min(w - bw - 4, bx));
+      const by = Math.max(4, Math.min(h - bh - 4, py - bh / 2));
+      ctx.fillStyle = nColor;
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(bx, by, bw, bh, 8) : ctx.rect(bx, by, bw, bh);
+      ctx.fill();
+      ctx.fillStyle = '#071311';
+      ctx.font = 'bold 15px system-ui, sans-serif';
+      ctx.fillText(line1, bx + 8, by + 18);
+      ctx.font = 'bold 12px system-ui, sans-serif';
+      ctx.fillText(line2, bx + 8, by + 34);
     }
   } else if (mode !== 'off' && ms.speed > 1.5) {
     // 地図が無いときは、いまの曲率のまま進んだ場合の軌跡を点線で
@@ -985,11 +1116,27 @@ function renderDrive() {
   $('#now-arrow').innerHTML = arrowSvg(Number.isFinite(Rnow) ? ms.turnDir : null, Rnow);
   $('#card-now').classList.toggle('over', hasFix && v > nowS.vRec);
 
-  // この先のカーブ（地図）
+  // 次のコーナー（地図）
   const nc = nextCurve(rr);
+  const card = $('#card-next');
+  let next = null;
   if (nc) {
     const s = speedAt(nc.R, nc.gradePct);
+    const prof = rr.profile;
+    // 入口までの平均勾配（下りなら同じ減速でも余分に制動力が要る）
+    const slope = prof.elev && nc.distStart > 0 ? (prof.elev[nc.startIdx] - prof.elev[prof.idx0]) / nc.distStart : 0;
+    const st = hasFix ? approachState(v, s, nc.distStart, slope) : 'ok';
+    const cls = classifyCorner(nc.R);
+    const then = rr.curves[rr.curves.indexOf(nc) + 1] || null;
+    next = { curve: nc, speeds: s, state: st, cls };
+
+    $('#next-dir').textContent = dirLabel(nc.dir);
+    const clsEl = $('#next-class');
+    clsEl.textContent = cls.label;
+    clsEl.dataset.level = String(cls.level);
     $('#next-dist').textContent = nc.distStart > 0 ? `${Math.round(nc.distStart)} m 先` : 'カーブ中';
+    const eta = secondsTo(nc.distStart, v);
+    $('#next-eta').textContent = eta != null && eta >= 1 && eta < 60 ? `約 ${Math.round(eta)} 秒` : '';
     $('#next-elev').innerHTML =
       nc.entryElev != null
         ? `標高 ${Math.round(nc.entryElev)} → ${Math.round(nc.exitElev)} m・${gradeHtml(nc.gradePct)}`
@@ -998,7 +1145,18 @@ function renderDrive() {
     $('#next-rec').textContent = fmtKmh(s.vRec);
     $('#next-lim').textContent = fmtKmh(s.vLimit);
     $('#next-arrow').innerHTML = arrowSvg(nc.dir, nc.R);
-    $('#card-next').classList.toggle('over', v > s.vRec);
+    const delta = Math.round((v - s.vRec) * 3.6);
+    const dEl = $('#next-delta');
+    dEl.className = `speed-delta ${st === 'ok' ? '' : st}`;
+    dEl.textContent = !hasFix ? '' : delta > 0 ? `${delta} km/h 減速` : `余裕 ${-delta} km/h`;
+    // 入口に近づくほど伸びるバー（表示範囲はプレビューと同じ）
+    const range = Math.max(150, Math.min(400, v * 10));
+    $('#next-bar').style.width = `${Math.round(Math.max(0, Math.min(1, 1 - nc.distStart / range)) * 100)}%`;
+    $('#next-then').textContent = then
+      ? `その次：${dirLabel(then.dir)} ${classifyCorner(then.R).label} ${fmtR(then.R)}・${Math.round(then.distStart)} m 先`
+      : '';
+    card.className = `card next-card state-${st}`;
+    maybeAnnounce(rr, nc, s, v);
   } else {
     const why = !running
       ? '--'
@@ -1009,13 +1167,19 @@ function renderDrive() {
           : !state.prefs.map && mode === 'gps'
             ? '地図オフ'
             : '道路未特定';
+    $('#next-dir').textContent = '';
+    $('#next-class').textContent = '';
     $('#next-dist').textContent = why;
+    $('#next-eta').textContent = '';
     $('#next-r').textContent = '--';
     $('#next-elev').textContent = '';
     $('#next-rec').textContent = '--';
     $('#next-lim').textContent = '--';
+    $('#next-delta').textContent = '';
+    $('#next-bar').style.width = '0';
+    $('#next-then').textContent = '';
     $('#next-arrow').innerHTML = arrowSvg(null, Infinity);
-    $('#card-next').classList.remove('over');
+    card.className = 'card next-card state-none';
   }
 
   // 警告
@@ -1058,8 +1222,8 @@ function renderDrive() {
         : MAP_STATUS[dem.status] || dem.status;
 
   if ($('#view-drive').classList.contains('active')) {
-    if (state.prefs.panel === 'map') updateMap(rr, ms);
-    else drawPreview(rr, ms);
+    if (state.prefs.panel === 'map') updateMap(rr, ms, next);
+    else drawPreview(rr, ms, next);
   }
 }
 
