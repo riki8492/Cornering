@@ -54,7 +54,10 @@ test('接近の状況：余裕あり → 減速 → 急ブレーキ', () => {
   assert.equal(approachState(14, s, 100), 'ok');
   assert.equal(approachState(18, s, 100), 'slow'); // 0.05G 程度で減速できる
   assert.equal(approachState(20, s, 15), 'danger'); // 15m で 20→15m/s は約 0.6G
-  assert.equal(approachState(22, s, 200), 'danger'); // 限界超え
+  // 限界を少し超えていても、入口まで十分遠ければ軽いブレーキで間に合う
+  assert.equal(approachState(22, s, 200), 'slow');
+  // カーブの中で限界を超えていれば危険
+  assert.equal(approachState(22, s, 0), 'danger');
   // 同じ速度・距離でも、下りだと必要な制動力が増える
   assert.equal(approachState(20, s, 40, 0), 'slow');
   assert.equal(approachState(20, s, 40, -0.15), 'danger');

@@ -1,6 +1,6 @@
 // オフラインでも起動できるよう、アプリ本体をキャッシュする
 // （道路データ＝Overpass API・標高タイル・地図タイルへの通信はキャッシュしない）
-const CACHE = 'cornering-v8';
+const CACHE = 'cornering-v9';
 const ASSETS = [
   './',
   'index.html',
