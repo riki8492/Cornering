@@ -168,3 +168,92 @@ test('RoadTracker は保存済みデータを使ったことを状態として�
   assert.equal(tracker.source, 'cache');
   assert.ok(tracker.update(fix, { speed: 15, heading: 0, headingSource: 'course' }, 1000));
 });
+
+// ---------- 事前ダウンロード ----------
+import { planTiles, bboxSizeKm, predownload } from '../js/roadcache.js';
+
+/** 中心 (lat0, lon0) から東西 wKm・南北 hKm の範囲 */
+function areaKm(lat0, lon0, wKm, hKm) {
+  const dLat = (hKm * 1000) / 111195 / 2;
+  const dLon = (wKm * 1000) / (111195 * Math.cos((lat0 * Math.PI) / 180)) / 2;
+  return { s: lat0 - dLat, n: lat0 + dLat, w: lon0 - dLon, e: lon0 + dLon };
+}
+
+test('事前ダウンロードの区画：5km ごとに分け、1km 重ねて取得する', () => {
+  const bbox = areaKm(35.3, 139.0, 12, 8);
+  const tiles = planTiles(bbox);
+  assert.equal(tiles.length, 3 * 2);
+  // 区画の受け持ちは範囲をすき間なく覆う
+  assert.ok(Math.abs(Math.min(...tiles.map((t) => t.inner.s)) - bbox.s) < 1e-9);
+  assert.ok(Math.abs(Math.max(...tiles.map((t) => t.inner.e)) - bbox.e) < 1e-9);
+  // 取得する範囲は 1km 広い
+  const t = tiles[0];
+  const ext = bboxSizeKm(t.query);
+  const inn = bboxSizeKm(t.inner);
+  assert.ok(Math.abs(ext.w - inn.w - 2) < 0.01 && Math.abs(ext.h - inn.h - 2) < 0.01);
+});
+
+test('事前ダウンロード：区画ごとに保存し、失敗した区画はもう一度押すと続きから', async () => {
+  const cache = new RoadCache({ backend: new MemoryBackend() });
+  const bbox = areaKm(35.3, 139.0, 9, 9); // 2×2 区画
+  let calls = 0;
+  let failOnce = true;
+  const fetchBbox = async (q) => {
+    calls++;
+    if (failOnce && calls === 2) {
+      failOnce = false;
+      throw new Error('電波なし');
+    }
+    return WAYS;
+  };
+  const progress = [];
+  const r1 = await predownload(bbox, cache, fetchBbox, { onProgress: (p) => progress.push(`${p.done}/${p.total}`) });
+  assert.deepEqual([r1.saved, r1.failed, r1.skipped], [3, 1, 0]);
+  assert.deepEqual(progress, ['0/4', '1/4', '2/4', '3/4', '4/4']);
+  const r2 = await predownload(bbox, cache, fetchBbox);
+  assert.deepEqual([r2.saved, r2.failed, r2.skipped], [1, 0, 3], '保存済みの区画は飛ばす');
+  assert.equal(calls, 5);
+  const st = await cache.stats();
+  assert.equal(st.manual, 4);
+  assert.ok(st.bytes > 0);
+});
+
+test('事前ダウンロード：広すぎる範囲は断る', async () => {
+  const cache = new RoadCache({ backend: new MemoryBackend() });
+  await assert.rejects(predownload(areaKm(35.3, 139.0, 40, 10), cache, async () => WAYS), /範囲が広すぎます/);
+});
+
+test('事前に保存した範囲の中なら、区画の境目でも通信せずに走れる', async () => {
+  const cache = new RoadCache({ backend: new MemoryBackend() });
+  const bbox = areaKm(35.3, 139.0, 10, 10); // 2×2 区画、境目は中心を通る
+  await predownload(bbox, cache, async () => WAYS);
+  let calls = 0;
+  const f = cachedFetcher(async () => {
+    calls++;
+    return WAYS;
+  }, cache);
+  // 区画の境目（範囲の中心）と、区画の内側の点
+  for (const [lat, lon] of [
+    [35.3, 139.0],
+    [35.28, 138.98],
+    [35.32, 139.03],
+  ]) {
+    const r = await f(lat, lon, 1000);
+    assert.equal(r.source, 'cache', `${lat},${lon}`);
+  }
+  assert.equal(calls, 0);
+  // 範囲の外は通信する
+  const out = await f(35.5, 139.0, 1000);
+  assert.equal(out.source, 'network');
+});
+
+test('保存した道路データを消去できる', async () => {
+  const cache = new RoadCache({ backend: new MemoryBackend() });
+  await cache.save(35, 139, 1000, WAYS);
+  await predownload(areaKm(35.3, 139.0, 4, 4), cache, async () => WAYS);
+  assert.deepEqual(Object.values(await cache.stats()).slice(0, 2), [1, 1]);
+  await cache.clear();
+  const st = await cache.stats();
+  assert.deepEqual([st.auto, st.manual, st.bytes], [0, 0, 0]);
+  assert.equal(await cache.findCovering(35, 139, 0), null);
+});

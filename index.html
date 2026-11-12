@@ -79,6 +79,10 @@
           <canvas id="preview" class="preview" aria-label="この先の道路形状"></canvas>
           <div id="map" class="map" hidden></div>
           <p class="map-hint" id="map-hint" hidden></p>
+          <div class="map-tools" id="map-tools" hidden>
+            <button class="btn small" id="btn-predownload" type="button">この範囲の道路を保存</button>
+            <span class="map-tools-status" id="predownload-status">電波の弱い所へ行く前に、走る範囲を表示して保存しておくと安心です（点線の枠が保存済み）</span>
+          </div>
         </div>
 
         <div class="chips" id="surface-chips" role="radiogroup" aria-label="路面状態"></div>
@@ -323,6 +327,15 @@
             </label>
           </div>
         </article>
+
+        <article class="card">
+          <header><h2>保存した道路データ</h2></header>
+          <p class="hint" id="cache-stats">--</p>
+          <p class="hint">走ったときに取得した道路と、走行画面の「地図・現在地」で事前に保存した範囲です。電波が届かない所でも、保存済みの範囲なら案内できます</p>
+          <div class="form-grid">
+            <button class="btn small wide" id="btn-cache-clear" type="button">保存した道路データを消去</button>
+          </div>
+        </article>
       </section>
 
       <!-- ===== 説明 ===== -->
@@ -340,7 +353,7 @@
         <article class="card prose">
           <header><h2>R（カーブ半径）の求め方</h2></header>
           <ul>
-            <li><b>この先のカーブ（地図）</b>：OpenStreetMap の道路形状に現在地を当てはめ、道なりに先読みして曲率を計算します。交差点では最も直進に近い道を選びます。取得した道路データは端末に保存し、30 日以内に同じ場所を走るときは通信せずに使います。電波の届かない山道でも、一度走った道（行きに通った道の帰り道など）は保存済みのデータで案内できます</li>
+            <li><b>この先のカーブ（地図）</b>：OpenStreetMap の道路形状に現在地を当てはめ、道なりに先読みして曲率を計算します。交差点では最も直進に近い道を選びます。取得した道路データは端末に保存し、30 日以内に同じ場所を走るときは通信せずに使います。電波の届かない山道でも、一度走った道（行きに通った道の帰り道など）は保存済みのデータで案内できます。初めて走る電波の弱い道は、出発前に「地図・現在地」で走る範囲を表示して「この範囲の道路を保存」を押しておくと、電波がなくても案内できます（30km 四方まで、点線の枠が保存済み）</li>
             <li><b>現在のカーブ（計測）</b>：ジャイロのヨーレート ω から R = v / ω、ジャイロが無ければ GPS の進行方位の変化率、さらに無ければ GPS 軌跡への円の当てはめで求めます</li>
             <li><b>入口・出口の標高</b>：国土地理院の標高タイル（10m メッシュ）を道路に沿って引き、カーブの入口と出口の標高差から勾配を求めます（国外は AWS Terrain Tiles）。橋・トンネルは地表の標高が使えないので前後から補間します</li>
             <li><b>次のコーナー</b>：向き・きつさ（ヘアピン R30 未満／きつい 〜60／ややきつい 〜120／ゆるい 〜250／ごくゆるい）・入口までの距離と秒数を表示し、カードの色で状況を示します（緑：安全上限以下、橙：減速が必要、赤：入口までに強いブレーキが必要か、カーブの中で限界超え）。道路形状と地図では次のコーナーだけを太い帯・入口の線・大きなラベルで強調します。設定で音声案内をオンにすると、入口の約 7 秒前に「左、きつい、アール60、100メートル先、50キロまで減速」のように読み上げ、減速が必要なときは「減速」「危険、急減速」と警告も読み上げます。Apple Music などの音楽は止まらず、読み上げている間だけ音量が下がります</li>
