@@ -7,7 +7,35 @@ import {
   cornerSpeech,
   isAnnounced,
   approachState,
+  pickJapaneseVoice,
+  alertToSpeak,
 } from '../js/corner.js';
+
+test('読み上げの声：日本語の声のうち、拡張版があればそれを選ぶ', () => {
+  const voices = [
+    { name: 'Samantha', lang: 'en-US', localService: true },
+    { name: 'Kyoko', lang: 'ja-JP', localService: true },
+    { name: 'Kyoko (Enhanced)', lang: 'ja-JP', localService: true },
+    { name: 'Google 日本語', lang: 'ja-JP', localService: false },
+  ];
+  assert.equal(pickJapaneseVoice(voices).name, 'Kyoko (Enhanced)');
+  assert.equal(pickJapaneseVoice(voices.filter((v) => !v.name.includes('Enhanced'))).name, 'Kyoko');
+  assert.equal(pickJapaneseVoice([{ name: 'Samantha', lang: 'en-US' }]), null);
+  assert.equal(pickJapaneseVoice([]), null);
+});
+
+test('警告の読み上げ：強くなったときに一度だけ。消えて 3 秒たったらまた読む', () => {
+  const st = { rank: 0, clearSince: null };
+  assert.equal(alertToSpeak(st, 'caution', 0), null, '黄色の注意は読まない');
+  assert.equal(alertToSpeak(st, 'brake', 1000), '減速');
+  assert.equal(alertToSpeak(st, 'brake', 2000), null, '同じ強さでは繰り返さない');
+  assert.equal(alertToSpeak(st, 'danger', 3000), '危険、急減速', '強くなったら読む');
+  assert.equal(alertToSpeak(st, 'brake', 4000), null, '弱くなっただけでは読まない');
+  assert.equal(alertToSpeak(st, null, 5000), null);
+  assert.equal(alertToSpeak(st, 'brake', 6000), null, '消えて 1 秒ではまだ読まない');
+  alertToSpeak(st, null, 7000);
+  assert.equal(alertToSpeak(st, 'brake', 10500), '減速', '消えて 3 秒たったらまた読む');
+});
 
 test('きつさの分類：R が小さいほどきつい', () => {
   assert.equal(classifyCorner(25).label, 'ヘアピン');

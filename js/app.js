@@ -16,7 +16,17 @@ import {
   presetToVehicle,
 } from './presets.js';
 import { loadLeaflet, DriveMap } from './mapview.js';
-import { classifyCorner, dirLabel, secondsTo, announceDistance, cornerSpeech, isAnnounced, approachState } from './corner.js';
+import {
+  classifyCorner,
+  dirLabel,
+  secondsTo,
+  announceDistance,
+  cornerSpeech,
+  isAnnounced,
+  approachState,
+  pickJapaneseVoice,
+  alertToSpeak,
+} from './corner.js';
 
 const STORE_KEY = 'cornering.v1';
 const $ = (sel) => document.querySelector(sel);
@@ -643,10 +653,10 @@ function bindPanels() {
 
 /** この先の道路を、色ごとのひと続きの線に分けて緯度経度にする */
 function aheadRuns(rr, v) {
-  if (!rr || !road.net) return [];
+  if (!rr) return [];
   const { pts, kappa, idx0, ds, elev } = rr.profile;
   const toLL = (p) => {
-    const ll = road.net.proj.toLatLon(p.x, p.y);
+    const ll = rr.proj.toLatLon(p.x, p.y);
     return [ll.lat, ll.lon];
   };
   const runs = [];
@@ -670,7 +680,7 @@ function updateMap(rr, ms, next = null) {
   hint.textContent = msg;
   if (!driveMap || !fix) return;
   const toLL = (p) => {
-    const ll = road.net.proj.toLatLon(p.x, p.y);
+    const ll = rr.proj.toLatLon(p.x, p.y);
     return [ll.lat, ll.lon];
   };
   const nc = next?.curve;
@@ -764,6 +774,8 @@ async function start(kind) {
   stop();
   if (state.prefs.sound) ensureAudio();
   if (state.prefs.voice) speak('案内を開始します');
+  alertVoiceState.rank = 0;
+  alertVoiceState.clearSince = null;
   motion.reset();
   gpsError = '';
   gradeFallback = null;
@@ -845,7 +857,13 @@ function beep(freq, count) {
 }
 
 function soundFor(alert) {
-  if (!state.prefs.sound || !alert || mode === 'off') return;
+  if (mode === 'off') return;
+  // 音声案内がオンなら、警告も言葉で伝える（音楽を聞いていてもビープ音より聞き取りやすい）
+  if (state.prefs.voice) {
+    const text = alertToSpeak(alertVoiceState, alert?.level || null, Date.now());
+    if (text) speak(text, { interrupt: alert.level === 'danger' });
+  }
+  if (!state.prefs.sound || !alert) return;
   const now = Date.now();
   if (alert.level === 'danger' && now - lastBeep > 1500) {
     beep(1320, 3);
@@ -857,24 +875,56 @@ function soundFor(alert) {
 }
 
 // ---------- 音声案内 ----------
+// iPhone の Safari の読み上げは、Apple Music などほかのアプリの音楽を止めずに、
+// 読み上げている間だけ音量を下げる（終わって約 1 秒で戻る）。警告音（Web Audio）は
+// 「ほかの音と混ぜて鳴らす」扱いなので、こちらも音楽を止めない。
+// 音楽を止めてしまう <audio> 要素などは使わないこと
 const announced = []; // 読み上げ済みのコーナー区間 {dir, pts: [[lat, lon], ...]}
+const alertVoiceState = { rank: 0, clearSince: null }; // 警告の読み上げ状態
 const canSpeak = () => 'speechSynthesis' in window && typeof SpeechSynthesisUtterance === 'function';
+let jaVoice = null;
 
-function speak(text) {
+/** 日本語の声を選び直す。声の一覧が取れない環境でもアプリ全体を止めないよう、失敗は無視する */
+function loadVoice() {
+  try {
+    const list = window.speechSynthesis?.getVoices?.() || [];
+    jaVoice = pickJapaneseVoice(list) || jaVoice;
+  } catch {
+    /* 既定の声で読む */
+  }
+}
+if (canSpeak()) {
+  loadVoice();
+  // 声の一覧は後から届くことがある
+  try {
+    window.speechSynthesis.addEventListener?.('voiceschanged', loadVoice);
+  } catch {
+    /* 無視 */
+  }
+}
+
+/**
+ * @param {string} text
+ * @param {{interrupt?:boolean}} [o] interrupt: 読み上げ中のものを止めてすぐ読む（危険の警告）
+ */
+function speak(text, o = {}) {
   if (!canSpeak()) return;
+  if (o.interrupt) window.speechSynthesis.cancel?.();
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'ja-JP';
-  u.rate = 1.1;
+  if (jaVoice) u.voice = jaVoice;
+  u.rate = 1.05;
+  u.volume = 1;
   window.speechSynthesis.speak(u);
 }
 
 /** 入口の約 7 秒前（80〜300m 手前）に一度だけ読み上げる */
 function maybeAnnounce(rr, nc, s, v) {
-  if (!state.prefs.voice || mode === 'off' || !road.net || !canSpeak()) return;
+  if (!state.prefs.voice || mode === 'off' || !rr || !canSpeak()) return;
   if (v < 3 || nc.distStart <= 15 || nc.distStart > announceDistance(v)) return;
   const pts = rr.profile.pts;
   const toLL = (p) => {
-    const ll = road.net.proj.toLatLon(p.x, p.y);
+    const ll = rr.proj.toLatLon(p.x, p.y);
     return [ll.lat, ll.lon];
   };
   const [lat, lon] = toLL(pts[nc.apexIdx]);
@@ -1327,6 +1377,13 @@ function init() {
   bindPresets();
   bindTabs();
   bindPanels();
+  // 音楽を流したまま押して、止まらずに音量が下がるかを確かめる
+  $('#btn-voice-test').addEventListener('click', () => {
+    loadVoice();
+    speak(`音声案内のテストです。${cornerSpeech({ dir: 'left', R: 58, distStart: 100 }, 50 / 3.6, 70 / 3.6)}`, {
+      interrupt: true,
+    });
+  });
   $('#btn-start').addEventListener('click', () => (mode === 'gps' ? stop() : start('gps')));
   $('#btn-demo').addEventListener('click', () => (mode === 'demo' ? stop() : start('demo')));
   window.addEventListener('resize', scheduleRender);

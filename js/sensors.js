@@ -33,7 +33,8 @@ export class MotionTracker {
     this.proj = null;
     this.fixes = [];
     this.speed = 0;
-    this.heading = null;
+    this.heading = null; // 最後に分かった進行方位（止まっている間も保つ）
+    this.headingSource = null; // 'course'（GPS のコース）| 'track'（軌跡から）
     this.accuracy = null;
     this.kappa = 0; // 平滑化した曲率（符号付き、正=左）
     this.kappaSource = null;
@@ -66,24 +67,48 @@ export class MotionTracker {
     const prev = this.fixes[this.fixes.length - 1];
     if (prev && f.t <= prev.t) return; // 時刻が戻ったものは捨てる
 
-    // 速度
+    // 速度：GPS の値が無ければ位置の変化から。1 秒ぶんだと止まっていても位置の揺れで
+    // 「動いている」ことになるので、3 秒以上前の位置との差で求める
     let speed = Number.isFinite(f.speed) && f.speed >= 0 ? f.speed : null;
     if (speed == null && prev) {
-      const dt = f.t - prev.t;
-      if (dt > 0) speed = dist(prev, p) / dt;
+      let q = prev;
+      for (let i = this.fixes.length - 1; i >= 0; i--) {
+        q = this.fixes[i];
+        if (f.t - q.t >= 3) break;
+      }
+      const dt = f.t - q.t;
+      if (dt > 0) speed = dist(q, p) / dt;
     }
     if (speed == null) speed = 0;
 
-    // 方位：GPS のコース（ドップラー由来で滑らか）を優先、無ければ移動方向
-    let heading = Number.isFinite(f.heading) && speed > 1.5 ? (f.heading + 360) % 360 : null;
-    if (heading == null && prev && dist(prev, p) > 3) heading = bearingDeg(prev, p);
+    // 方位：GPS のコース（ドップラー由来で滑らか）を優先。
+    // 無い端末（Android に多い）では軌跡から求めるが、直前 1 秒の移動だと低速では GPS の誤差に
+    // 負けて向きが暴れる（止まっていても位置が揺れて向きが付いてしまう）。そこで、ある程度
+    // 走っているときだけ、12m 以上離れた 8 秒以内の過去の位置からの向きを使う。
+    // 止まっている間は最後の向きをそのまま保つ
+    let heading = Number.isFinite(f.heading) && f.heading >= 0 && speed > 1.5 ? (f.heading + 360) % 360 : null;
+    let headingSource = heading != null ? 'course' : null;
+    if (heading == null && speed > 2) {
+      for (let i = this.fixes.length - 1; i >= 0; i--) {
+        const q = this.fixes[i];
+        if (f.t - q.t > 8) break;
+        if (dist(q, p) >= 12) {
+          heading = bearingDeg(q, p);
+          headingSource = 'track';
+          break;
+        }
+      }
+    }
 
     const rec = { t: f.t, lat: f.lat, lon: f.lon, x: p.x, y: p.y, speed, heading, accuracy: f.accuracy };
     this.fixes.push(rec);
     while (this.fixes.length && f.t - this.fixes[0].t > 15) this.fixes.shift();
 
     this.speed = speed;
-    if (heading != null) this.heading = heading;
+    if (heading != null) {
+      this.heading = heading;
+      this.headingSource = headingSource;
+    }
     this.accuracy = Number.isFinite(f.accuracy) ? f.accuracy : null;
     this.lastFix = rec;
     this.#updateCurvature(f.t);
@@ -176,6 +201,7 @@ export class MotionTracker {
     return {
       speed: this.speed,
       heading: this.heading,
+      headingSource: this.headingSource,
       accuracy: this.accuracy,
       radius: this.radius,
       turnDir: this.turnDir,

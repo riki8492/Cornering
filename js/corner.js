@@ -45,6 +45,43 @@ export function cornerSpeech(c, vRec, v) {
 }
 
 /**
+ * 読み上げに使う日本語の声を選ぶ。拡張（Enhanced / Premium）の声があれば聞き取りやすいので優先する
+ * @param {Array<{name:string, lang:string, localService?:boolean}>} voices speechSynthesis.getVoices() の結果
+ */
+export function pickJapaneseVoice(voices) {
+  const ja = (voices || []).filter((v) => /^ja([-_]|$)/i.test(v.lang || ''));
+  if (!ja.length) return null;
+  const score = (v) =>
+    (/(enhanced|premium|拡張|高品質)/i.test(v.name) ? 4 : 0) + (v.localService ? 1 : 0) + (/^ja[-_]JP$/i.test(v.lang) ? 1 : 0);
+  return ja.reduce((best, v) => (score(v) > score(best) ? v : best), ja[0]);
+}
+
+/** 警告の読み上げ文言（音楽を聞いているとビープ音は埋もれやすいので、言葉でも伝える） */
+export const ALERT_SPEECH = { brake: '減速', danger: '危険、急減速' };
+
+/**
+ * 警告を読み上げるかどうか。警告が強くなったときに一度だけ読み上げ、同じ強さでは繰り返さない。
+ * 警告が消えて 3 秒たったら、次の警告をまた読み上げられるようにする
+ * @param {{rank:number, clearSince:number|null}} st 前回までの状態（呼ぶたびに更新する）
+ * @param {'caution'|'brake'|'danger'|null} level 今の警告
+ * @param {number} now [ms]
+ * @returns {string|null} 読み上げる文言
+ */
+export function alertToSpeak(st, level, now) {
+  const rank = { brake: 1, danger: 2 }[level] || 0;
+  // 警告が消えてから 3 秒以上たっていれば、次の警告は新しいものとして読む
+  if (st.clearSince != null && now - st.clearSince >= 3000) st.rank = 0;
+  if (rank === 0) {
+    if (st.clearSince == null) st.clearSince = now;
+    return null;
+  }
+  st.clearSince = null;
+  if (rank <= st.rank) return null;
+  st.rank = rank;
+  return ALERT_SPEECH[level];
+}
+
+/**
  * 同じコーナーを二度読み上げないための判定。
  * 頂点（いちばんきつい点）は更新のたびに揺れ、長くゆるいカーブでは区間内のどこへでも動く。
  * そこで読み上げ済みのカーブは区間全体の点列で覚えておき、
