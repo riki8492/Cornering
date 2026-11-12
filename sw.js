@@ -1,6 +1,6 @@
 // オフラインでも起動できるよう、アプリ本体をキャッシュする
 // （道路データ＝Overpass API・標高タイル・地図タイルへの通信はキャッシュしない）
-const CACHE = 'cornering-v11';
+const CACHE = 'cornering-v12';
 const ASSETS = [
   './',
   'index.html',
@@ -13,6 +13,7 @@ const ASSETS = [
   'js/sensors.js',
   'js/sim.js',
   'js/presets.js',
+  'js/roadcache.js',
   'js/mapview.js',
   'js/corner.js',
   'vendor/leaflet/leaflet.js',

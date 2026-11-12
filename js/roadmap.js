@@ -30,10 +30,17 @@ const HIGHWAY_TYPES = [
   'tertiary_link',
 ];
 
+// 公開されている Overpass API のサーバー。混んでいたり止まっていたりすることがあるので、
+// 応答がなければ次へ回す（日本のサーバーは試験運用で、予告なく止まることがある）
 export const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+  'https://overpass.osm.jp/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
 ];
+
+/** 最後に応答したサーバー。次はここから試す */
+let preferredEndpoint = 0;
 
 function parseOneway(tags = {}) {
   const v = tags.oneway;
@@ -282,27 +289,48 @@ export class RoadNetwork {
   }
 }
 
-/** Overpass API から周辺の道路を取得 */
-export async function fetchRoadsOverpass(lat, lon, radius, { signal, endpoints = OVERPASS_ENDPOINTS } = {}) {
+/**
+ * Overpass API から周辺の道路を取得する。
+ * 電波の弱い山道や混雑したサーバーでは応答が返ってこないまま待たされることがあるので、
+ * 1 つのサーバーにつき timeoutMs で打ち切り、次のサーバーを試す
+ */
+export async function fetchRoadsOverpass(
+  lat,
+  lon,
+  radius,
+  { signal, endpoints = OVERPASS_ENDPOINTS, timeoutMs = 15000, fetchImpl = globalThis.fetch } = {},
+) {
   const re = `^(${HIGHWAY_TYPES.join('|')})$`;
-  const q = `[out:json][timeout:25];way(around:${Math.round(radius)},${lat.toFixed(6)},${lon.toFixed(6)})["highway"~"${re}"];out geom;`;
+  const q = `[out:json][timeout:20];way(around:${Math.round(radius)},${lat.toFixed(6)},${lon.toFixed(6)})["highway"~"${re}"];out geom;`;
+  const isDefault = endpoints === OVERPASS_ENDPOINTS;
+  const start = isDefault ? preferredEndpoint % endpoints.length : 0;
   let lastErr;
-  for (const url of endpoints) {
+  for (let k = 0; k < endpoints.length; k++) {
+    const i = (start + k) % endpoints.length;
+    const url = endpoints[i];
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const onAbort = () => ctl.abort();
+    signal?.addEventListener?.('abort', onAbort);
     try {
-      const res = await fetch(url, {
+      const res = await fetchImpl(url, {
         method: 'POST',
         body: 'data=' + encodeURIComponent(q),
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal,
+        signal: ctl.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
+      if (isDefault) preferredEndpoint = i;
       return (json.elements || [])
         .filter((e) => e.type === 'way' && Array.isArray(e.geometry) && Array.isArray(e.nodes))
         .map((e) => ({ id: e.id, nodes: e.nodes, geometry: e.geometry, tags: e.tags || {} }));
     } catch (e) {
       if (signal?.aborted) throw e;
-      lastErr = e;
+      lastErr = ctl.signal.aborted ? new Error('応答がありません（電波が弱いか、サーバーが混雑）') : e;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener?.('abort', onAbort);
     }
   }
   throw lastErr || new Error('Overpass に接続できません');
@@ -325,6 +353,7 @@ export class RoadTracker {
     shift = 450,
     refetchAt = 500,
     minFetchInterval = 15000,
+    stuckAfter = 45000,
     elevation = null,
   } = {}) {
     this.fetcher = fetcher;
@@ -333,11 +362,16 @@ export class RoadTracker {
     this.shift = shift;
     this.refetchAt = refetchAt;
     this.minFetchInterval = minFetchInterval;
+    this.stuckAfter = stuckAfter; // これ以上応答がなければ、あきらめて取り直す [ms]
     this.net = null;
     this.center = null;
     this.status = 'idle';
     this.error = '';
+    this.source = null; // 'network' | 'cache'（保存済み）| 'cache-fallback'（通信できず保存済みで代用）
     this.loading = false;
+    this.loadingSince = 0;
+    this.fetchToken = 0;
+    this.clock = 0; // update() に渡された最新の時刻 [ms]
     this.retryAt = 0;
     this.lastFetchAt = -Infinity;
     this.failures = 0;
@@ -363,8 +397,34 @@ export class RoadTracker {
     this.lastUpdate = null;
   }
 
+  /** 取得を始めてからの経過時間 [ms]（取得中でなければ 0） */
+  loadingElapsed(now = this.clock) {
+    return this.loading ? Math.max(0, now - this.loadingSince) : 0;
+  }
+
+  /** 次に取り直すまでの残り時間 [ms] */
+  retryIn(now = this.clock) {
+    return Math.max(0, this.retryAt - now);
+  }
+
+  #fail(e) {
+    this.failures++;
+    this.error = String(e?.message || e);
+    if (!this.net) this.status = 'error';
+    // 地図が無いうちは早めに、あるなら控えめに取り直す
+    const base = this.net ? 10000 : 5000;
+    this.retryAt = this.clock + Math.min(60000, base * 2 ** (this.failures - 1));
+  }
+
   #maybeFetch(lat, lon, headingDeg, now) {
-    if (!this.fetcher || this.loading || now < this.retryAt) return;
+    if (!this.fetcher) return;
+    // 応答が返ってこないまま固まったら、あきらめて取り直す（遅れて届いた結果は捨てる）
+    if (this.loading && now - this.loadingSince > this.stuckAfter) {
+      this.loading = false;
+      this.fetchToken++;
+      this.#fail(new Error('応答がありません（電波が弱いか、サーバーが混雑）'));
+    }
+    if (this.loading || now < this.retryAt) return;
     if (this.center && this.net) {
       const d = haversine(lat, lon, this.center.lat, this.center.lon);
       if (d < this.refetchAt) return;
@@ -383,9 +443,15 @@ export class RoadTracker {
       cLon = ll.lon;
     }
     this.loading = true;
+    this.loadingSince = now;
+    const token = ++this.fetchToken;
     if (!this.net) this.status = 'loading';
-    this.fetcher(cLat, cLon, this.radius, {})
-      .then((ways) => {
+    Promise.resolve()
+      .then(() => this.fetcher(cLat, cLon, this.radius, { here: { lat, lon } }))
+      .then((res) => {
+        if (token !== this.fetchToken) return; // あきらめた後に届いた結果
+        const ways = Array.isArray(res) ? res : res.ways;
+        this.source = Array.isArray(res) ? 'network' : res.source || 'network';
         const oldNet = this.net;
         const net = new RoadNetwork(ways, { lat: cLat, lon: cLon });
         // 「いま走っている道」を way の id で新しいデータに引き継ぐ（止まっている間に取り直しても見失わない）
@@ -405,13 +471,11 @@ export class RoadTracker {
         this.failures = 0;
       })
       .catch((e) => {
-        this.failures++;
-        this.error = String(e?.message || e);
-        if (!this.net) this.status = 'error';
-        this.retryAt = Date.now() + Math.min(120000, 10000 * 2 ** (this.failures - 1));
+        if (token !== this.fetchToken) return;
+        this.#fail(e);
       })
       .finally(() => {
-        this.loading = false;
+        if (token === this.fetchToken) this.loading = false;
       });
   }
 
@@ -420,6 +484,7 @@ export class RoadTracker {
    * @param {{speed:number, heading:number|null}} motion
    */
   update(fix, motion, now = Date.now()) {
+    this.clock = now;
     const moving = motion.speed > 1.5;
     // 最後に分かった進行方位。止まっている間も保たれる（車は止まったまま向きを変えない）
     const heading = motion.heading ?? null;

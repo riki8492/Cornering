@@ -2,7 +2,8 @@
 
 import * as P from './physics.js';
 import { MotionTracker, startGps, startGyro, requestMotionPermission } from './sensors.js';
-import { RoadTracker } from './roadmap.js';
+import { RoadTracker, fetchRoadsOverpass } from './roadmap.js';
+import { RoadCache, IdbBackend, MemoryBackend, cachedFetcher } from './roadcache.js';
 import { DemElevation, gradeBetween } from './elevation.js';
 import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
@@ -108,6 +109,22 @@ const MAP_STATUS = {
   error: '取得失敗',
   'no-road': '道路外',
 };
+
+/** 状態表示の「地図」欄：経過秒数・再試行までの秒数・保存済みデータの利用を出す */
+function mapStatusText(r) {
+  const sec = (ms) => Math.ceil(ms / 1000);
+  if (r.status === 'loading') return `読込中 ${sec(r.loadingElapsed())}秒`;
+  if (r.status === 'error') {
+    return r.loading ? `再試行中 ${sec(r.loadingElapsed())}秒` : `取得失敗・${sec(r.retryIn())}秒後に再試行`;
+  }
+  const src = r.source === 'cache' ? '（保存済み）' : r.source === 'cache-fallback' ? '（保存済み・通信不可）' : '';
+  return `${MAP_STATUS[r.status] || r.status}${src}${r.loading ? '（更新中）' : ''}`;
+}
+
+// 取得した道路データの保存先（IndexedDB が使えなければメモリ）
+const roadCache = new RoadCache({
+  backend: typeof indexedDB !== 'undefined' ? new IdbBackend() : new MemoryBackend(),
+});
 
 // ---------- 車両の計算 ----------
 let veh = P.deriveVehicle(state.vehicle);
@@ -801,7 +818,11 @@ async function start(kind) {
   } else {
     if (state.prefs.elevation && !(dem instanceof DemElevation)) dem = new DemElevation();
     if (!state.prefs.elevation) dem = null;
-    road = new RoadTracker({ ...(state.prefs.map ? {} : { fetcher: null }), elevation: dem });
+    // 取得した道路データは端末に保存し、同じ道や電波の弱い所で使う
+    road = new RoadTracker({
+      fetcher: state.prefs.map ? cachedFetcher(fetchRoadsOverpass, roadCache) : null,
+      elevation: dem,
+    });
     // iOS ではクリック処理の中で許可を求める必要がある
     const motionOk = state.prefs.gyro ? requestMotionPermission() : Promise.resolve(false);
     stopGps = startGps(onFix, onGpsError);
@@ -1281,11 +1302,13 @@ function renderDrive() {
       ? '--'
       : rr
         ? '直線が続きます'
-        : road.status === 'loading'
-          ? '地図を読込中'
-          : !state.prefs.map && mode === 'gps'
-            ? '地図オフ'
-            : '道路未特定';
+        : !state.prefs.map && mode === 'gps'
+          ? '地図オフ'
+          : road.status === 'loading'
+            ? `地図を読込中（${Math.round(road.loadingElapsed() / 1000)}秒）`
+            : road.status === 'error'
+              ? '地図を取得できません'
+              : '道路未特定';
     $('#next-dir').textContent = '';
     $('#next-class').textContent = '';
     $('#next-dist').textContent = why;
@@ -1329,7 +1352,7 @@ function renderDrive() {
       ? 'オフ'
       : !running
         ? '--'
-        : `${MAP_STATUS[road.status] || road.status}${road.loading && road.net ? '（更新中）' : ''}`;
+        : mapStatusText(road);
   $('#st-map').textContent = mapState;
   $('#st-src').textContent = SOURCE_LABEL[ms.source] || '--';
   $('#st-elev').textContent = !state.prefs.elevation
