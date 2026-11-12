@@ -643,10 +643,10 @@ function bindPanels() {
 
 /** この先の道路を、色ごとのひと続きの線に分けて緯度経度にする */
 function aheadRuns(rr, v) {
-  if (!rr || !road.net) return [];
+  if (!rr) return [];
   const { pts, kappa, idx0, ds, elev } = rr.profile;
   const toLL = (p) => {
-    const ll = road.net.proj.toLatLon(p.x, p.y);
+    const ll = rr.proj.toLatLon(p.x, p.y);
     return [ll.lat, ll.lon];
   };
   const runs = [];
@@ -670,7 +670,7 @@ function updateMap(rr, ms, next = null) {
   hint.textContent = msg;
   if (!driveMap || !fix) return;
   const toLL = (p) => {
-    const ll = road.net.proj.toLatLon(p.x, p.y);
+    const ll = rr.proj.toLatLon(p.x, p.y);
     return [ll.lat, ll.lon];
   };
   const nc = next?.curve;
@@ -870,11 +870,11 @@ function speak(text) {
 
 /** 入口の約 7 秒前（80〜300m 手前）に一度だけ読み上げる */
 function maybeAnnounce(rr, nc, s, v) {
-  if (!state.prefs.voice || mode === 'off' || !road.net || !canSpeak()) return;
+  if (!state.prefs.voice || mode === 'off' || !rr || !canSpeak()) return;
   if (v < 3 || nc.distStart <= 15 || nc.distStart > announceDistance(v)) return;
   const pts = rr.profile.pts;
   const toLL = (p) => {
-    const ll = road.net.proj.toLatLon(p.x, p.y);
+    const ll = rr.proj.toLatLon(p.x, p.y);
     return [ll.lat, ll.lon];
   };
   const [lat, lon] = toLL(pts[nc.apexIdx]);
