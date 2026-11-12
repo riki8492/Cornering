@@ -754,6 +754,17 @@ details.card > summary::-webkit-details-marker {
   color: var(--text);
 }
 
+.voice-test {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin: -4px 0 0 32px;
+}
+
+.voice-test .hint {
+  margin: 0;
+}
+
 .field.check input {
   width: 20px;
   height: 20px;

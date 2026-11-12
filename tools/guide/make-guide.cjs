@@ -560,9 +560,10 @@ async function main() {
     const marks = [
       { n: 1, box: await row('sound'), at: 'left' },
       { n: 2, box: await row('voice'), at: 'left' },
-      { n: 3, box: await row('gyro'), at: 'left' },
-      { n: 4, box: await row('map'), at: 'left' },
-      { n: 5, box: await row('elevation'), at: 'left' },
+      { n: 3, box: await boxOf(page, '#btn-voice-test', '#__prefs'), at: 'right' },
+      { n: 4, box: await row('gyro'), at: 'left' },
+      { n: 5, box: await row('map'), at: 'left' },
+      { n: 6, box: await row('elevation'), at: 'left' },
     ];
     await render(
       browser,
@@ -573,10 +574,11 @@ async function main() {
         figures: [figure(shot, marks, 500)],
         legend: [
           [1, '警告音', '速度超過・減速が必要なときにピッと鳴る'],
-          [2, '音声案内（おすすめ）', '入口の約 7 秒前に「左、きつい、アール60、100メートル先、50キロまで減速」'],
-          [3, 'ジャイロ', 'スマホを固定すると、今のカーブの R を正確に測れる'],
-          [4, '地図データ', 'OpenStreetMap で前方のカーブを先読み（通信あり）'],
-          [5, '標高データ', '国土地理院の標高で上り・下りを考慮（通信あり）'],
+          [2, '音声案内（おすすめ）', '入口の約 7 秒前に「左、きつい、アール60、100メートル先、50キロまで減速」。減速が必要なときは「減速」と警告も読む'],
+          [3, '音声案内をテスト', 'Apple Music などの音楽は止まらず、読み上げの間だけ音量が下がる。音楽を流したまま押して確かめられる'],
+          [4, 'ジャイロ', 'スマホを固定すると、今のカーブの R を正確に測れる'],
+          [5, '地図データ', 'OpenStreetMap で前方のカーブを先読み（通信あり）'],
+          [6, '標高データ', '国土地理院の標高で上り・下りを考慮（通信あり）'],
         ],
         extra: `<div class="box warn"><h2>必ず守ること</h2>
           ・運転中にスマホを見たり操作したりしない（設定は停車中か同乗者が）<br>
