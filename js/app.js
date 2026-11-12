@@ -2,8 +2,8 @@
 
 import * as P from './physics.js';
 import { MotionTracker, startGps, startGyro, requestMotionPermission } from './sensors.js';
-import { RoadTracker, fetchRoadsOverpass } from './roadmap.js';
-import { RoadCache, IdbBackend, MemoryBackend, cachedFetcher } from './roadcache.js';
+import { RoadTracker, fetchRoadsOverpass, fetchRoadsOverpassBbox } from './roadmap.js';
+import { RoadCache, IdbBackend, MemoryBackend, cachedFetcher, predownload } from './roadcache.js';
 import { DemElevation, gradeBetween } from './elevation.js';
 import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
@@ -636,7 +636,9 @@ async function ensureMap() {
           state.prefs.mapLayer = key;
           save();
         },
+        onLocate: locateOnce,
       });
+      refreshSavedAreas();
     }
     mapError = '';
   } catch (e) {
@@ -644,6 +646,74 @@ async function ensureMap() {
   }
   scheduleRender();
   return driveMap;
+}
+
+// ---------- 道路データの保存（事前ダウンロード） ----------
+let predownloadCtl = null;
+
+/** 走り出す前に「現在地」を押したとき：一度だけ測位して地図をそこへ */
+function locateOnce() {
+  const status = $('#predownload-status');
+  if (!('geolocation' in navigator)) return;
+  status.textContent = '現在地を確認中…';
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      driveMap?.goTo(p.coords.latitude, p.coords.longitude, 14);
+      status.className = 'map-tools-status';
+      status.textContent = '走る範囲が画面に入るように動かしてから保存してください';
+    },
+    () => {
+      status.className = 'map-tools-status bad';
+      status.textContent = '現在地を取得できません。地図を指で動かして範囲を決めてください';
+    },
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 },
+  );
+}
+
+async function refreshSavedAreas() {
+  driveMap?.showSavedAreas(await roadCache.list());
+  const s = await roadCache.stats();
+  const mb = s.bytes / 1024 / 1024;
+  $('#cache-stats').textContent =
+    s.auto + s.manual === 0
+      ? '保存した道路データはありません'
+      : `走行中に保存：${s.auto} 範囲／事前に保存：${s.manual} 区画（合計 約 ${mb < 0.1 ? '0.1' : mb.toFixed(1)}MB）`;
+}
+
+/** 地図に見えている範囲の道路を、区画に分けて取得・保存する */
+async function runPredownload() {
+  const btn = $('#btn-predownload');
+  const status = $('#predownload-status');
+  if (predownloadCtl) {
+    predownloadCtl.abort(); // 2 回目の押下で中止
+    return;
+  }
+  const m = await ensureMap();
+  if (!m) return;
+  predownloadCtl = new AbortController();
+  btn.textContent = '中止';
+  status.className = 'map-tools-status busy';
+  try {
+    const r = await predownload(m.bounds(), roadCache, fetchRoadsOverpassBbox, {
+      signal: predownloadCtl.signal,
+      onProgress: (p) => {
+        status.textContent = `保存中 ${p.done}/${p.total} 区画…（電波のある所で、画面を開いたまま）`;
+        if (p.saved) refreshSavedAreas();
+      },
+    });
+    const parts = [`${r.saved} 区画を保存`];
+    if (r.skipped) parts.push(`${r.skipped} 区画は保存済み`);
+    if (r.failed) parts.push(`${r.failed} 区画は失敗（もう一度押すと続きを保存）`);
+    status.className = `map-tools-status ${r.failed ? 'bad' : ''}`;
+    status.textContent = predownloadCtl.signal.aborted ? `中止しました（${parts.join('・')}）` : `完了：${parts.join('・')}`;
+  } catch (e) {
+    status.className = 'map-tools-status bad';
+    status.textContent = String(e.message || e);
+  } finally {
+    predownloadCtl = null;
+    btn.textContent = 'この範囲の道路を保存';
+    refreshSavedAreas();
+  }
 }
 
 /** 走行画面の下段の表示を切り替える */
@@ -654,6 +724,7 @@ function showPanel(name) {
   for (const b of $$('.panel-switch button')) b.setAttribute('aria-selected', String(b.dataset.panel === panel));
   $('#preview').hidden = panel !== 'shape';
   $('#map').hidden = panel !== 'map';
+  $('#map-tools').hidden = panel !== 'map';
   if (panel === 'map') {
     ensureMap().then((m) => {
       m?.invalidate();
@@ -1401,6 +1472,13 @@ function init() {
   bindTabs();
   bindPanels();
   // 音楽を流したまま押して、止まらずに音量が下がるかを確かめる
+  $('#btn-predownload').addEventListener('click', runPredownload);
+  $('#btn-cache-clear').addEventListener('click', async () => {
+    if (!window.confirm('保存した道路データをすべて消去しますか？（電波の届かない所では案内できなくなります）')) return;
+    await roadCache.clear();
+    refreshSavedAreas();
+  });
+  refreshSavedAreas();
   $('#btn-voice-test').addEventListener('click', () => {
     loadVoice();
     speak(`音声案内のテストです。${cornerSpeech({ dir: 'left', R: 58, distStart: 100 }, 50 / 3.6, 70 / 3.6)}`, {
@@ -1411,6 +1489,8 @@ function init() {
   $('#btn-demo').addEventListener('click', () => (mode === 'demo' ? stop() : start('demo')));
   window.addEventListener('resize', scheduleRender);
   setInterval(() => mode !== 'off' && scheduleRender(), 1000);
+  // 走行中に自動で保存された範囲を、地図と設定の表示に反映する
+  setInterval(() => mode === 'gps' && refreshSavedAreas(), 20000);
   recompute();
   updateControls();
   if ('serviceWorker' in navigator && window.isSecureContext) {

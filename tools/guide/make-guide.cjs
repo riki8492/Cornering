@@ -434,6 +434,7 @@ async function main() {
     { fig: 'map', box: await mrel('.curve-label.next span'), at: 'tl', title: '次のコーナーのラベル', desc: '入口までの距離と安全上限' },
     { fig: 'map', box: await mrel('.leaflet-control-layers'), at: 'left', title: '地図の種類', desc: '地理院地図・航空写真・OpenStreetMap' },
     { fig: 'map', box: await mrel('.map-recenter'), at: 'left', title: '現在地ボタン', desc: '指で地図を動かすと追従が止まる。押すと現在地に戻る' },
+    { fig: 'map', box: await mrel('#btn-predownload'), at: 'left', title: 'この範囲の道路を保存', desc: '電波の弱い所へ行く前に、走る範囲を表示して保存。保存済みの範囲は点線の枠で表示され、電波がなくても案内できる' },
   ]);
   await page.click('#btn-demo'); // デモ停止
   await page.click('[data-panel="shape"]');

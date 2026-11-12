@@ -63,8 +63,9 @@ export class DriveMap {
    * @param {object} [o]
    * @param {string} [o.baseLayer] 'gsi' | 'photo' | 'osm'
    * @param {(key:string)=>void} [o.onBaseLayerChange]
+   * @param {()=>void} [o.onLocate] 現在地がまだ分からないときに「現在地」ボタンが押された
    */
-  constructor(L, el, { baseLayer = 'gsi', onBaseLayerChange } = {}) {
+  constructor(L, el, { baseLayer = 'gsi', onBaseLayerChange, onLocate } = {}) {
     this.L = L;
     const map = L.map(el, { zoomControl: true, preferCanvas: true }).setView([36.2, 138.25], 5);
     this.map = map;
@@ -100,6 +101,7 @@ export class DriveMap {
         L.DomEvent.on(b, 'click', () => {
           self.setFollow(true);
           if (self.pos) map.setView(self.pos, Math.max(map.getZoom(), 15));
+          else onLocate?.(); // 走り出す前（事前ダウンロードの範囲を決めるときなど）
         });
         self.recenterBtn = b;
         return b;
@@ -107,6 +109,8 @@ export class DriveMap {
     });
     new Recenter().addTo(map);
 
+    // 保存済みの道路データの範囲（いちばん下に描く）
+    this.saved = L.layerGroup().addTo(map);
     this.track = L.polyline([], { color: '#8b9aab', weight: 3, opacity: 0.6, interactive: false }).addTo(map);
     this.trackLen = 0;
     // 次のコーナーの帯は道路の線より下に描く（追加順＝描画順）
@@ -123,6 +127,41 @@ export class DriveMap {
   setFollow(on) {
     this.follow = on;
     this.recenterBtn?.classList.toggle('active', on);
+  }
+
+  /** 見えている範囲（南・西・北・東） */
+  bounds() {
+    const b = this.map.getBounds();
+    return { s: b.getSouth(), w: b.getWest(), n: b.getNorth(), e: b.getEast() };
+  }
+
+  /** 地図を指定位置へ（現在地が分からないうちに位置だけ分かったとき） */
+  goTo(lat, lon, zoom = 14) {
+    this.map.setView([lat, lon], zoom);
+  }
+
+  /**
+   * 保存済みの道路データの範囲を描く。事前ダウンロード（四角）は点線、走行中の自動保存（円）は薄く
+   * @param {Array<object>} metas RoadCache.list() の結果
+   */
+  showSavedAreas(metas) {
+    const L = this.L;
+    this.saved.clearLayers();
+    for (const m of metas) {
+      if (m.kind === 'bbox' && m.bbox) {
+        L.rectangle(
+          [
+            [m.bbox.s, m.bbox.w],
+            [m.bbox.n, m.bbox.e],
+          ],
+          { color: '#2dd4bf', weight: 1.5, dashArray: '5 5', fillOpacity: 0.05, interactive: false },
+        ).addTo(this.saved);
+      } else if (m.radius) {
+        L.circle([m.lat, m.lon], { radius: m.radius, color: '#2dd4bf', weight: 0, fillOpacity: 0.04, interactive: false }).addTo(
+          this.saved,
+        );
+      }
+    }
   }
 
   /** 非表示から表示に切り替えたあとに呼ぶ（サイズの再計算） */

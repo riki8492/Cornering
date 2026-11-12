@@ -289,19 +289,30 @@ export class RoadNetwork {
   }
 }
 
+const HIGHWAY_RE = `^(${HIGHWAY_TYPES.join('|')})$`;
+
 /**
  * Overpass API から周辺の道路を取得する。
  * 電波の弱い山道や混雑したサーバーでは応答が返ってこないまま待たされることがあるので、
  * 1 つのサーバーにつき timeoutMs で打ち切り、次のサーバーを試す
  */
-export async function fetchRoadsOverpass(
-  lat,
-  lon,
-  radius,
-  { signal, endpoints = OVERPASS_ENDPOINTS, timeoutMs = 15000, fetchImpl = globalThis.fetch } = {},
-) {
-  const re = `^(${HIGHWAY_TYPES.join('|')})$`;
-  const q = `[out:json][timeout:20];way(around:${Math.round(radius)},${lat.toFixed(6)},${lon.toFixed(6)})["highway"~"${re}"];out geom;`;
+export function fetchRoadsOverpass(lat, lon, radius, opts = {}) {
+  const q = `[out:json][timeout:20];way(around:${Math.round(radius)},${lat.toFixed(6)},${lon.toFixed(6)})["highway"~"${HIGHWAY_RE}"];out geom;`;
+  return queryOverpass(q, { timeoutMs: 15000, ...opts });
+}
+
+/**
+ * 四角い範囲（南・西・北・東の緯度経度）の道路を取得する（事前ダウンロード用）。
+ * 範囲にかかる道路は、範囲の外にはみ出した部分も含めて丸ごと返る
+ * @param {{s:number, w:number, n:number, e:number}} bbox
+ */
+export function fetchRoadsOverpassBbox(bbox, opts = {}) {
+  const f = (x) => x.toFixed(6);
+  const q = `[out:json][timeout:60];way(${f(bbox.s)},${f(bbox.w)},${f(bbox.n)},${f(bbox.e)})["highway"~"${HIGHWAY_RE}"];out geom;`;
+  return queryOverpass(q, { timeoutMs: 45000, ...opts });
+}
+
+async function queryOverpass(q, { signal, endpoints = OVERPASS_ENDPOINTS, timeoutMs = 15000, fetchImpl = globalThis.fetch } = {}) {
   const isDefault = endpoints === OVERPASS_ENDPOINTS;
   const start = isDefault ? preferredEndpoint % endpoints.length : 0;
   let lastErr;

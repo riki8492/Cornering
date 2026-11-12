@@ -546,6 +546,32 @@ details.card > summary::-webkit-details-marker {
   background: var(--bg);
 }
 
+.map-tools {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.map-tools[hidden] {
+  display: none;
+}
+
+.map-tools-status {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.map-tools-status.busy {
+  color: var(--accent);
+}
+
+.map-tools-status.bad {
+  color: var(--warn);
+}
+
 .map-hint {
   position: absolute;
   left: 0;
