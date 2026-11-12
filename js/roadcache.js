@@ -179,18 +179,18 @@ export class RoadCache {
   }
 
   /** 走行中に取得した円い範囲を保存 */
-  save(lat, lon, radius, ways, now = Date.now()) {
+  save(lat, lon, radius, ways, now = Date.now(), provider) {
     const id = `${lat.toFixed(5)},${lon.toFixed(5)},${Math.round(radius)}`;
-    return this.#put({ id, kind: 'circle', lat, lon, radius, ts: now, count: ways.length, manual: false }, ways);
+    return this.#put({ id, kind: 'circle', lat, lon, radius, ts: now, count: ways.length, manual: false, provider }, ways);
   }
 
   /** 事前ダウンロードした四角い範囲を保存 */
-  saveBbox(bbox, ways, now = Date.now()) {
+  saveBbox(bbox, ways, now = Date.now(), provider) {
     const f = (x) => x.toFixed(5);
     const id = `bbox:${f(bbox.s)},${f(bbox.w)},${f(bbox.n)},${f(bbox.e)}`;
     const lat = (bbox.s + bbox.n) / 2;
     const lon = (bbox.w + bbox.e) / 2;
-    return this.#put({ id, kind: 'bbox', bbox, lat, lon, ts: now, count: ways.length, manual: true }, ways);
+    return this.#put({ id, kind: 'bbox', bbox, lat, lon, ts: now, count: ways.length, manual: true, provider }, ways);
   }
 
   async #put(meta, ways) {
@@ -314,7 +314,7 @@ export async function predownload(bbox, cache, fetchBbox, { onProgress, signal, 
     throw new Error(`範囲が広すぎます（${Math.round(size.w)}×${Math.round(size.h)}km）。${maxKm}km 四方までに拡大してください`);
   }
   const tiles = planTiles(bbox);
-  const p = { done: 0, total: tiles.length, saved: 0, skipped: 0, failed: 0, ways: 0 };
+  const p = { done: 0, total: tiles.length, saved: 0, skipped: 0, failed: 0, ways: 0, gsi: 0, error: '' };
   onProgress?.({ ...p });
   for (const t of tiles) {
     if (signal?.aborted) break;
@@ -323,14 +323,18 @@ export async function predownload(bbox, cache, fetchBbox, { onProgress, signal, 
       p.skipped++;
     } else {
       try {
-        const ways = await fetchBbox(t.query, { signal });
-        if (await cache.saveBbox(t.query, ways, now())) {
+        const got = await fetchBbox(t.query, { signal });
+        const ways = Array.isArray(got) ? got : got.ways;
+        const provider = Array.isArray(got) ? undefined : got.provider;
+        if (await cache.saveBbox(t.query, ways, now(), provider)) {
           p.saved++;
           p.ways += ways.length;
+          if (provider === 'gsi') p.gsi++;
         } else p.failed++;
       } catch (e) {
         if (signal?.aborted) break;
         p.failed++;
+        p.error = String(e?.message || e);
       }
     }
     p.done++;
@@ -353,18 +357,21 @@ export function cachedFetcher(fetcher, cache, { maxAgeDays = 30, now = () => Dat
     const fresh = await cache.findCovering(lat, lon, radius * 0.7);
     if (fresh && now() - fresh.ts < maxAgeDays * DAY) {
       const ways = await cache.load(fresh);
-      if (ways) return { ways, source: 'cache' };
+      if (ways) return { ways, source: 'cache', provider: fresh.provider };
     }
     try {
-      const ways = await fetcher(lat, lon, radius, opts);
-      await cache.save(lat, lon, radius, ways, now());
-      return { ways, source: 'network' };
+      // 取得元を切り替える関数（roadsource.js）は {ways, provider} を返す
+      const got = await fetcher(lat, lon, radius, opts);
+      const ways = Array.isArray(got) ? got : got.ways;
+      const provider = Array.isArray(got) ? undefined : got.provider;
+      await cache.save(lat, lon, radius, ways, now(), provider);
+      return { ways, source: 'network', provider };
     } catch (e) {
       // 通信できないとき：古くても、狭くても、現在地のまわりが入っていれば使う
       const near = fresh || (await cache.findCovering(lat, lon, 0)) || (opts.here && (await cache.findCovering(opts.here.lat, opts.here.lon, 150)));
       if (near) {
         const ways = await cache.load(near);
-        if (ways) return { ways, source: 'cache-fallback' };
+        if (ways) return { ways, source: 'cache-fallback', provider: near.provider };
       }
       throw e;
     }

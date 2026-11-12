@@ -312,15 +312,21 @@ export function fetchRoadsOverpassBbox(bbox, opts = {}) {
   return queryOverpass(q, { timeoutMs: 45000, ...opts });
 }
 
-async function queryOverpass(q, { signal, endpoints = OVERPASS_ENDPOINTS, timeoutMs = 15000, fetchImpl = globalThis.fetch } = {}) {
+/**
+ * @param {number} [o.deadlineMs] 全サーバー合わせての持ち時間（これを過ぎたら次のサーバーを試さない）
+ */
+async function queryOverpass(q, { signal, endpoints = OVERPASS_ENDPOINTS, timeoutMs = 15000, deadlineMs = Infinity, fetchImpl = globalThis.fetch } = {}) {
   const isDefault = endpoints === OVERPASS_ENDPOINTS;
   const start = isDefault ? preferredEndpoint % endpoints.length : 0;
+  const began = Date.now();
   let lastErr;
   for (let k = 0; k < endpoints.length; k++) {
+    const left = deadlineMs - (Date.now() - began);
+    if (left < 1000) break;
     const i = (start + k) % endpoints.length;
     const url = endpoints[i];
     const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const timer = setTimeout(() => ctl.abort(), Math.min(timeoutMs, left));
     const onAbort = () => ctl.abort();
     signal?.addEventListener?.('abort', onAbort);
     try {
@@ -330,7 +336,7 @@ async function queryOverpass(q, { signal, endpoints = OVERPASS_ENDPOINTS, timeou
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         signal: ctl.signal,
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw new Error(res.status === 429 || res.status >= 500 ? `混雑（HTTP ${res.status}）` : `HTTP ${res.status}`);
       const json = await res.json();
       if (isDefault) preferredEndpoint = i;
       return (json.elements || [])
@@ -338,13 +344,17 @@ async function queryOverpass(q, { signal, endpoints = OVERPASS_ENDPOINTS, timeou
         .map((e) => ({ id: e.id, nodes: e.nodes, geometry: e.geometry, tags: e.tags || {} }));
     } catch (e) {
       if (signal?.aborted) throw e;
-      lastErr = ctl.signal.aborted ? new Error('応答がありません（電波が弱いか、サーバーが混雑）') : e;
+      lastErr = ctl.signal.aborted
+        ? new Error('応答がありません（電波が弱いか、サーバーが混雑）')
+        : e instanceof TypeError
+          ? new Error('通信できません')
+          : e;
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener?.('abort', onAbort);
     }
   }
-  throw lastErr || new Error('Overpass に接続できません');
+  throw lastErr || new Error('応答がありません（電波が弱いか、サーバーが混雑）');
 }
 
 /**
@@ -379,6 +389,7 @@ export class RoadTracker {
     this.status = 'idle';
     this.error = '';
     this.source = null; // 'network' | 'cache'（保存済み）| 'cache-fallback'（通信できず保存済みで代用）
+    this.provider = null; // 道路データの取得元：'osm' | 'gsi'
     this.loading = false;
     this.loadingSince = 0;
     this.fetchToken = 0;
@@ -463,6 +474,7 @@ export class RoadTracker {
         if (token !== this.fetchToken) return; // あきらめた後に届いた結果
         const ways = Array.isArray(res) ? res : res.ways;
         this.source = Array.isArray(res) ? 'network' : res.source || 'network';
+        this.provider = Array.isArray(res) ? null : res.provider || null; // 'osm' | 'gsi'（国土地理院）
         const oldNet = this.net;
         const net = new RoadNetwork(ways, { lat: cLat, lon: cLon });
         // 「いま走っている道」を way の id で新しいデータに引き継ぐ（止まっている間に取り直しても見失わない）

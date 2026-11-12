@@ -2,8 +2,9 @@
 
 import * as P from './physics.js';
 import { MotionTracker, startGps, startGyro, requestMotionPermission } from './sensors.js';
-import { RoadTracker, fetchRoadsOverpass, fetchRoadsOverpassBbox } from './roadmap.js';
+import { RoadTracker } from './roadmap.js';
 import { RoadCache, IdbBackend, MemoryBackend, cachedFetcher, predownload } from './roadcache.js';
+import { makeRoadSource } from './roadsource.js';
 import { DemElevation, gradeBetween } from './elevation.js';
 import { makeProjector } from './geo.js';
 import { startDemo } from './sim.js';
@@ -117,9 +118,22 @@ function mapStatusText(r) {
   if (r.status === 'error') {
     return r.loading ? `再試行中 ${sec(r.loadingElapsed())}秒` : `取得失敗・${sec(r.retryIn())}秒後に再試行`;
   }
-  const src = r.source === 'cache' ? '（保存済み）' : r.source === 'cache-fallback' ? '（保存済み・通信不可）' : '';
+  const notes = [];
+  if (r.provider === 'gsi') notes.push('国土地理院');
+  if (r.source === 'cache') notes.push('保存済み');
+  if (r.source === 'cache-fallback') notes.push('保存済み・通信不可');
+  const src = notes.length ? `（${notes.join('・')}）` : '';
   return `${MAP_STATUS[r.status] || r.status}${src}${r.loading ? '（更新中）' : ''}`;
 }
+
+/** 取得に失敗した理由を短く（「OpenStreetMap：混雑（HTTP 503）／国土地理院：通信できません」など） */
+function mapErrorText(r) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return '圏外（通信できません）';
+  return r.error || '';
+}
+
+// 道路データの取得元（OpenStreetMap → だめなら国土地理院）
+const roadSource = makeRoadSource();
 
 // 取得した道路データの保存先（IndexedDB が使えなければメモリ）
 const roadCache = new RoadCache({
@@ -694,16 +708,16 @@ async function runPredownload() {
   btn.textContent = '中止';
   status.className = 'map-tools-status busy';
   try {
-    const r = await predownload(m.bounds(), roadCache, fetchRoadsOverpassBbox, {
+    const r = await predownload(m.bounds(), roadCache, roadSource.fetchBbox, {
       signal: predownloadCtl.signal,
       onProgress: (p) => {
         status.textContent = `保存中 ${p.done}/${p.total} 区画…（電波のある所で、画面を開いたまま）`;
         if (p.saved) refreshSavedAreas();
       },
     });
-    const parts = [`${r.saved} 区画を保存`];
+    const parts = [`${r.saved} 区画を保存${r.gsi ? `（うち ${r.gsi} 区画は国土地理院のデータ）` : ''}`];
     if (r.skipped) parts.push(`${r.skipped} 区画は保存済み`);
-    if (r.failed) parts.push(`${r.failed} 区画は失敗（もう一度押すと続きを保存）`);
+    if (r.failed) parts.push(`${r.failed} 区画は失敗（もう一度押すと続きを保存。理由：${r.error}）`);
     status.className = `map-tools-status ${r.failed ? 'bad' : ''}`;
     status.textContent = predownloadCtl.signal.aborted ? `中止しました（${parts.join('・')}）` : `完了：${parts.join('・')}`;
   } catch (e) {
@@ -891,7 +905,7 @@ async function start(kind) {
     if (!state.prefs.elevation) dem = null;
     // 取得した道路データは端末に保存し、同じ道や電波の弱い所で使う
     road = new RoadTracker({
-      fetcher: state.prefs.map ? cachedFetcher(fetchRoadsOverpass, roadCache) : null,
+      fetcher: state.prefs.map ? cachedFetcher(roadSource.fetch, roadCache) : null,
       elevation: dem,
     });
     // iOS ではクリック処理の中で許可を求める必要がある
@@ -1390,7 +1404,8 @@ function renderDrive() {
     $('#next-lim').textContent = '--';
     $('#next-delta').textContent = '';
     $('#next-bar').style.width = '0';
-    $('#next-then').textContent = '';
+    // 地図を取得できないときは理由を出す（サーバーの混雑か、圏外か）
+    $('#next-then').textContent = running && road.status === 'error' ? `理由：${mapErrorText(road)}` : '';
     $('#next-arrow').innerHTML = arrowSvg(null, Infinity);
     card.className = 'card next-card state-none';
   }
